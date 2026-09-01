@@ -12,9 +12,7 @@ from typing import Any, Dict, List
 EXCEL_FILE_PATH = "Elofic AI Agent Data.xlsx"
 COLLECTION_NAME = "elofic_catalog"
 DB_PERSIST_PATH = "./elofic_vectordb"
-OPENROUTER_MODEL = "google/gemini-2.0-flash-exp:free"
-# or
-# OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
+OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
 
 # =========================================================
 # 1. Parsing & Indexing Logic
