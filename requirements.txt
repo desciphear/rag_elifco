@@ -8,3 +8,4 @@ google-genai
 python-dotenv
 tabulate
 torchvision
+openai
