@@ -4,12 +4,18 @@ import streamlit as st
 
 EXCEL_FILE_PATH = "Elofic AI Agent Data.xlsx"
 
+# Columns to always display in search results
+DISPLAY_COLUMNS = [
+    'PART NO', 'MAKER', 'MODEL', 'APPLICATION', 
+    'TYPE', 'MRP', 'OEM', 'PUROLATOR', 'Image Link'
+]
+
 # =========================================================
 # 1. Load and Cache Catalog Data
 # =========================================================
 @st.cache_data
 def load_catalog(file_path: str) -> pd.DataFrame:
-    """Loads all sheets, forward-fills merged headers, and cleans the catalog."""
+    """Loads all sheets, forward-fills merged headers (including Image Link), and cleans data."""
     if not os.path.exists(file_path):
         st.error(f"Catalog file '{file_path}' not found.")
         st.stop()
@@ -19,7 +25,7 @@ def load_catalog(file_path: str) -> pd.DataFrame:
 
     merged_columns = [
         'PART NO', 'MAKER', 'SEGMENT', 'APPLICATION',
-        'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'PUROLATOR'
+        'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'PUROLATOR', 'Image Link'
     ]
 
     for sheet_name, df in excel_data.items():
@@ -39,34 +45,26 @@ df_catalog = load_catalog(EXCEL_FILE_PATH)
 # 2. Rule-Based Chatbot Search Engine
 # =========================================================
 def parse_and_search_catalog(query: str, df: pd.DataFrame):
-    """
-    Direct natural language search engine without LLMs.
-    Matches multi-word intents (e.g., 'cabin filter for swift', 'maruti all parts', 'EK-2502').
-    """
+    """Direct multi-token keyword search across all catalog columns."""
     q_clean = query.lower().strip()
 
     # Broad listing check
     if q_clean in ["all", "all parts", "list all", "show all", "catalog", "full catalog"]:
         return f"📋 Displaying complete catalog ({len(df)} records):", df
 
-    # Searchable text across all relevant columns
     search_cols = ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'OEM', 'PUROLATOR']
     combined_text = df[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
 
-    # Filter out conversational stop words
     stop_words = {
         'for', 'the', 'in', 'of', 'and', 'a', 'is', 'price', 'mrp', 'cost',
         'give', 'me', 'show', 'parts', 'part', 'filter', 'filters',
         'what', 'which', 'tell', 'all', 'any', 'every', 'list', 'please'
     }
-    
     tokens = [t for t in q_clean.split() if t not in stop_words]
 
-    # If the query only had stop words (e.g., "show all parts"), return full catalog
     if not tokens:
         return f"📋 Displaying complete catalog ({len(df)} records):", df
 
-    # Match rows containing all non-stopword tokens
     mask = pd.Series(True, index=df.index)
     for token in tokens:
         mask = mask & combined_text.str.contains(token, na=False, regex=False)
@@ -84,10 +82,28 @@ def parse_and_search_catalog(query: str, df: pd.DataFrame):
             None
         )
 
-    # Distinct part number summary
     unique_parts = results['PART NO'].nunique()
     msg = f"🔍 Found **{len(results)} matching entries** across **{unique_parts} unique Part Number(s)**:"
     return msg, results
+
+
+def render_results_table(df_to_render: pd.DataFrame):
+    """Renders the DataFrame with Image Link column as a clickable link."""
+    cols_to_show = [c for c in DISPLAY_COLUMNS if c in df_to_render.columns]
+    
+    st.dataframe(
+        df_to_render[cols_to_show],
+        column_config={
+            "Image Link": st.column_config.LinkColumn(
+                "Image Link",
+                help="Click to open part image",
+                validate="^https?://",
+                max_chars=40
+            )
+        },
+        use_container_width=True,
+        hide_index=True
+    )
 
 # =========================================================
 # 3. Streamlit Chat UI
@@ -101,7 +117,7 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = [
         {
             "role": "assistant",
-            "text": "Hello! I can look up parts, prices (MRP), and OEM numbers from the Elofic catalog. What are you looking for?",
+            "text": "Hello! I can look up parts, prices (MRP), OEM numbers, and image links from the Elofic catalog. What are you looking for?",
             "data": None
         }
     ]
@@ -111,26 +127,21 @@ for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
         st.markdown(msg["text"])
         if msg["data"] is not None:
-            display_cols = ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'MRP', 'OEM', 'PUROLATOR']
-            st.dataframe(msg["data"][[c for c in display_cols if c in msg["data"].columns]], use_container_width=True, hide_index=True)
+            render_results_table(msg["data"])
 
 # Chat Input Handler
 if user_input := st.chat_input("Ask a question (e.g., 'All parts for Maruti', 'Swift cabin filter', 'EK-2506')..."):
-    # Render user prompt
     st.session_state.chat_history.append({"role": "user", "text": user_input, "data": None})
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Search catalog
     with st.chat_message("assistant"):
         response_text, response_df = parse_and_search_catalog(user_input, df_catalog)
         st.markdown(response_text)
         
         if response_df is not None:
-            display_cols = ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'MRP', 'OEM', 'PUROLATOR']
-            st.dataframe(response_df[[c for c in display_cols if c in response_df.columns]], use_container_width=True, hide_index=True)
+            render_results_table(response_df)
 
-        # Append assistant response to session state
         st.session_state.chat_history.append({
             "role": "assistant",
             "text": response_text,
