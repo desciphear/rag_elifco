@@ -1,25 +1,19 @@
 import os
-import chromadb
 import pandas as pd
 import streamlit as st
-from chromadb.utils import embedding_functions
-from google import genai
-from dotenv import load_dotenv
-from typing import Any, Dict, List
 
-# =========================================================
-# Configuration
-# =========================================================
 EXCEL_FILE_PATH = "Elofic AI Agent Data.xlsx"
-COLLECTION_NAME = "elofic_catalog"
-DB_PERSIST_PATH = "./elofic_vectordb"
 
 # =========================================================
-# 1. Parsing & Indexing Logic
+# 1. Load and Cache Catalog Data
 # =========================================================
 @st.cache_data
-def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
-    """Loads all sheets and applies forward fill for merged headers."""
+def load_catalog(file_path: str) -> pd.DataFrame:
+    """Loads all sheets, forward-fills merged headers, and cleans the catalog."""
+    if not os.path.exists(file_path):
+        st.error(f"Catalog file '{file_path}' not found.")
+        st.stop()
+
     excel_data = pd.read_excel(file_path, sheet_name=None)
     frames = []
 
@@ -32,212 +26,113 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
         df = df.dropna(how="all")
         df.columns = [str(col).strip() for col in df.columns]
 
-        available_merge_cols = [c for c in merged_columns if c in df.columns]
-        df[available_merge_cols] = df[available_merge_cols].ffill()
-        df = df.fillna('N/A')
-        df['sheet_name'] = sheet_name
+        available = [c for c in merged_columns if c in df.columns]
+        df[available] = df[available].ffill()
+        df = df.fillna("N/A")
         frames.append(df)
 
     return pd.concat(frames, ignore_index=True)
 
+df_catalog = load_catalog(EXCEL_FILE_PATH)
 
-def build_documents_from_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Converts cleaned DataFrame rows into descriptive passages."""
-    documents = []
-    for idx, row in df.iterrows():
-        part_no = row.get('PART NO', 'N/A')
-        maker = row.get('MAKER', 'N/A')
-        model = row.get('MODEL', 'N/A')
-        app = row.get('APPLICATION', 'N/A')
-        part_type = row.get('TYPE', 'N/A')
-        mrp = row.get('MRP', 'N/A')
-        oem = row.get('OEM', 'N/A')
-        purolator = row.get('PUROLATOR', 'N/A')
-        pack_size = row.get('PACK SIZE', 'N/A')
-        engine_bs = row.get('ENGINE BS', 'N/A')
-        sheet_name = row.get('sheet_name', 'Catalog')
+# =========================================================
+# 2. Rule-Based Chatbot Search Engine
+# =========================================================
+def parse_and_search_catalog(query: str, df: pd.DataFrame):
+    """
+    Direct natural language search engine without LLMs.
+    Matches multi-word intents (e.g., 'cabin filter for swift', 'maruti all parts', 'EK-2502').
+    """
+    q_clean = query.lower().strip()
 
-        text_passage = (
-            f"Elofic Part Number: {part_no} | "
-            f"Vehicle Maker: {maker} | "
-            f"Applicable Model: {model} | "
-            f"Filter Application: {app} | "
-            f"Filter Type: {part_type} | "
-            f"Engine Standard: {engine_bs} | "
-            f"MRP: ₹{mrp} | "
-            f"Pack Size: {pack_size} | "
-            f"OEM Cross-Reference: {oem} | "
-            f"Purolator Cross-Reference: {purolator}"
+    # Broad listing check
+    if q_clean in ["all", "all parts", "list all", "show all", "catalog", "full catalog"]:
+        return f"📋 Displaying complete catalog ({len(df)} records):", df
+
+    # Searchable text across all relevant columns
+    search_cols = ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'OEM', 'PUROLATOR']
+    combined_text = df[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
+
+    # Filter out conversational stop words
+    stop_words = {
+        'for', 'the', 'in', 'of', 'and', 'a', 'is', 'price', 'mrp', 'cost',
+        'give', 'me', 'show', 'parts', 'part', 'filter', 'filters',
+        'what', 'which', 'tell', 'all', 'any', 'every', 'list', 'please'
+    }
+    
+    tokens = [t for t in q_clean.split() if t not in stop_words]
+
+    # If the query only had stop words (e.g., "show all parts"), return full catalog
+    if not tokens:
+        return f"📋 Displaying complete catalog ({len(df)} records):", df
+
+    # Match rows containing all non-stopword tokens
+    mask = pd.Series(True, index=df.index)
+    for token in tokens:
+        mask = mask & combined_text.str.contains(token, na=False, regex=False)
+
+    results = df[mask]
+
+    if results.empty:
+        return (
+            "❌ **No matching parts found.**\n\n"
+            "Try searching by:\n"
+            "* **Car Model** (e.g., `Swift`, `Alto 800`, `Ciaz`, `Baleno`)\n"
+            "* **Application** (e.g., `Cabin Air`, `Oil`, `Fuel`)\n"
+            "* **Part Number** (e.g., `EK-2502`, `EK-1622`)\n"
+            "* **OEM Number** (e.g., `95861M74L00`)",
+            None
         )
 
-        documents.append({
-            "page_content": text_passage,
-            "metadata": {
-                "part_no": str(part_no),
-                "maker": str(maker),
-                "model": str(model),
-                "application": str(app),
-                "mrp": str(mrp),
-                "oem": str(oem),
-                "sheet_name": str(sheet_name),
-                "row_index": int(idx)
-            }
-        })
-    return documents
-
-
-@st.cache_resource(show_spinner=False)
-def initialize_database():
-    """Initializes ChromaDB and embeds the Excel file on startup."""
-    embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name="all-MiniLM-L6-v2"
-    )
-    chroma_client = chromadb.PersistentClient(path=DB_PERSIST_PATH)
-    
-    collection = chroma_client.get_or_create_collection(
-        name=COLLECTION_NAME,
-        embedding_function=embedding_fn,
-        metadata={"hnsw:space": "cosine"}
-    )
-
-    if collection.count() == 0:
-        if not os.path.exists(EXCEL_FILE_PATH):
-            raise FileNotFoundError(f"Static catalog file '{EXCEL_FILE_PATH}' not found.")
-        
-        df_clean = load_and_clean_dataframe(EXCEL_FILE_PATH)
-        docs = build_documents_from_df(df_clean)
-        
-        ids = [f"doc_{idx}" for idx in range(len(docs))]
-        texts = [doc["page_content"] for doc in docs]
-        metadatas = [doc["metadata"] for doc in docs]
-
-        batch_size = 64
-        for i in range(0, len(texts), batch_size):
-            collection.add(
-                ids=ids[i : i + batch_size],
-                documents=texts[i : i + batch_size],
-                metadatas=metadatas[i : i + batch_size]
-            )
-
-    return collection
-
-
-# Load catalog dataframe & vector store
-df_catalog = load_and_clean_dataframe(EXCEL_FILE_PATH)
-collection = initialize_database()
-
-# Load environment variables from a .env file if present
-load_dotenv()
-
-# Ensure GEMINI_API_KEY is provided; surface a clear error if not
-_gemini_key = os.getenv("GEMINI_API_KEY")
-if not _gemini_key:
-    err = (
-        "No GEMINI_API_KEY found. Please set the GEMINI_API_KEY environment variable. "
-        "See https://ai.google.dev/gemini-api/docs/api-key for instructions."
-    )
-    try:
-        # If running inside Streamlit, show a friendly error in the UI
-        st.error(err)
-    except Exception:
-        pass
-    raise RuntimeError(err)
-
-client = genai.Client(api_key=_gemini_key)
+    # Distinct part number summary
+    unique_parts = results['PART NO'].nunique()
+    msg = f"🔍 Found **{len(results)} matching entries** across **{unique_parts} unique Part Number(s)**:"
+    return msg, results
 
 # =========================================================
-# 2. Hybrid Retrieval & Generation Pipeline
+# 3. Streamlit Chat UI
 # =========================================================
-def query_rag_pipeline(user_query: str, n_results: int = 10) -> str:
-    """
-    1. If user asks for all parts / catalog view, filters the full DataFrame and returns all rows.
-    2. Otherwise, uses semantic vector search for specific queries.
-    """
-    q_lower = user_query.lower()
-    is_list_all_query = any(w in q_lower for w in ["all", "every", "list", "total", "catalog", "show parts", "full"])
+st.set_page_config(page_title="Elofic Catalog Bot", layout="wide")
+st.title("🤖 Elofic Catalog Chat Assistant")
+st.caption(f"Zero-LLM Local Chat Search • {len(df_catalog)} Total Parts Loaded")
 
-    # ROUTE 1: Tabular Exhaustive Query (Returns 100% of matching parts)
-    if is_list_all_query:
-        filtered_df = df_catalog.copy()
+# Initialize Chat History
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = [
+        {
+            "role": "assistant",
+            "text": "Hello! I can look up parts, prices (MRP), and OEM numbers from the Elofic catalog. What are you looking for?",
+            "data": None
+        }
+    ]
 
-        # Dynamic filtering based on application
-        if "cabin" in q_lower:
-            filtered_df = filtered_df[filtered_df['APPLICATION'].str.upper().str.contains('CABIN', na=False)]
-        elif "oil" in q_lower:
-            filtered_df = filtered_df[filtered_df['APPLICATION'].str.upper().str.contains('OIL', na=False)]
-        elif "fuel" in q_lower:
-            filtered_df = filtered_df[filtered_df['APPLICATION'].str.upper().str.contains('FUEL', na=False)]
-        elif "air" in q_lower:
-            filtered_df = filtered_df[filtered_df['APPLICATION'].str.upper().str.contains('AIR', na=False)]
+# Display Previous Messages
+for msg in st.session_state.chat_history:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["text"])
+        if msg["data"] is not None:
+            display_cols = ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'MRP', 'OEM', 'PUROLATOR']
+            st.dataframe(msg["data"][[c for c in display_cols if c in msg["data"].columns]], use_container_width=True, hide_index=True)
 
-        # Group by Part Number so duplicates across vehicle models are aggregated cleanly
-        grouped = filtered_df.groupby('PART NO').agg({
-            'MAKER': 'first',
-            'MODEL': lambda x: ', '.join(x.unique()),
-            'APPLICATION': 'first',
-            'TYPE': 'first',
-            'MRP': 'first'
-        }).reset_index()
-
-        # Convert to Markdown Table directly so LLM doesn't truncate the list
-        table_md = grouped[['PART NO', 'MAKER', 'APPLICATION', 'TYPE', 'MRP', 'MODEL']].to_markdown(index=False)
-        return f"### 📋 Found {len(grouped)} Unique Part Numbers ({len(filtered_df)} Vehicle Applications):\n\n" + table_md
-
-    # ROUTE 2: Semantic Vector Search for specific questions
-    search_results = collection.query(
-        query_texts=[user_query],
-        n_results=n_results
-    )
-    retrieved_docs = search_results.get("documents", [[]])[0]
-    context = "\n".join(f"- {doc}" for doc in retrieved_docs) if retrieved_docs else "No relevant parts found."
-
-    system_instruction = (
-        "You are an Elofic Auto Parts catalog assistant. "
-        "Answer the question accurately using ONLY the catalog context below. "
-        "Do not omit or truncate any parts present in the context. "
-        "Always list Part Number, Model, Application, and MRP."
-    )
-
-    prompt_content = f"Catalog Context:\n{context}\n\nUser Question: {user_query}"
-
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt_content,
-        config={
-            "system_instruction": system_instruction,
-            "temperature": 0.1,
-        },
-    )
-    return response.text
-
-# =========================================================
-# 3. Streamlit UI
-# =========================================================
-st.set_page_config(page_title="Elofic Catalog Assistant", layout="centered")
-st.title("🚗 Elofic Catalog Assistant")
-
-# Initialize message history
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# Render conversation history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-# User Chat Input
-if user_prompt := st.chat_input("Ask about Elofic parts (e.g., 'List all parts for Maruti' or 'MRP for Swift cabin filter')..."):
-    st.session_state.messages.append({"role": "user", "content": user_prompt})
+# Chat Input Handler
+if user_input := st.chat_input("Ask a question (e.g., 'All parts for Maruti', 'Swift cabin filter', 'EK-2506')..."):
+    # Render user prompt
+    st.session_state.chat_history.append({"role": "user", "text": user_input, "data": None})
     with st.chat_message("user"):
-        st.markdown(user_prompt)
+        st.markdown(user_input)
 
+    # Search catalog
     with st.chat_message("assistant"):
-        with st.spinner("Searching catalog..."):
-            try:
-                answer = query_rag_pipeline(user_prompt)
-                st.markdown(answer)
-                st.session_state.messages.append({"role": "assistant", "content": answer})
-            except Exception as e:
-                error_msg = f"Error: {str(e)}"
-                st.error(error_msg)
-                st.session_state.messages.append({"role": "assistant", "content": error_msg})
+        response_text, response_df = parse_and_search_catalog(user_input, df_catalog)
+        st.markdown(response_text)
+        
+        if response_df is not None:
+            display_cols = ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'MRP', 'OEM', 'PUROLATOR']
+            st.dataframe(response_df[[c for c in display_cols if c in response_df.columns]], use_container_width=True, hide_index=True)
+
+        # Append assistant response to session state
+        st.session_state.chat_history.append({
+            "role": "assistant",
+            "text": response_text,
+            "data": response_df
+        })
