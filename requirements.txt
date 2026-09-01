@@ -9,3 +9,6 @@ python-dotenv
 tabulate
 torchvision
 openai
+fastapi
+uvicorn
+twilio
