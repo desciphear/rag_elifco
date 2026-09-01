@@ -209,7 +209,7 @@ def stream_conversational_rag(user_query: str):
         "1. DO NOT truncate or leave out parts. If the context contains multiple parts, list all of them.\n"
         "2. DO NOT use raw Markdown tables. Use conversational paragraphs and organized bullet points with bold highlights.\n"
         "3. For each part, include Part Number, Applicable Models, Application, and MRP in ₹.\n"
-        "4. If an image link exists and is not 'N/A', include it as: [View Part Image](URL).\n"
+        "4. If an image link exists and is not 'N/A', render it directly as an image: ![Part Preview](URL).\n"
         "5. Be concise, friendly, and helpful."
     )
 
@@ -222,7 +222,7 @@ def stream_conversational_rag(user_query: str):
             {"role": "user", "content": prompt_content},
         ],
         temperature=0.1,
-        max_tokens=1500,
+        max_tokens=2000,
         stream=True,
     )
 
