@@ -1,27 +1,25 @@
 import os
+import chromadb
 import pandas as pd
 import streamlit as st
+from chromadb.utils import embedding_functions
+from google import genai
+from typing import Any, Dict, List
 
+# =========================================================
+# Configuration
+# =========================================================
 EXCEL_FILE_PATH = "Elofic AI Agent Data.xlsx"
-
-# Columns to always display in search results
-DISPLAY_COLUMNS = [
-    'PART NO', 'MAKER', 'MODEL', 'APPLICATION', 
-    'TYPE', 'MRP', 'OEM', 'PUROLATOR', 'Image Link'
-]
+COLLECTION_NAME = "elofic_catalog"
+DB_PERSIST_PATH = "./elofic_vectordb"
 
 # =========================================================
-# 1. Load and Cache Catalog Data
+# 1. Parsing & Indexing Logic
 # =========================================================
-@st.cache_data
-def load_catalog(file_path: str) -> pd.DataFrame:
-    """Loads all sheets, forward-fills merged headers (including Image Link), and cleans data."""
-    if not os.path.exists(file_path):
-        st.error(f"Catalog file '{file_path}' not found.")
-        st.stop()
-
+def process_excel_to_documents(file_path: str) -> List[Dict[str, Any]]:
+    """Loads catalog, cascades merged headers, and serializes rich context chunks."""
     excel_data = pd.read_excel(file_path, sheet_name=None)
-    frames = []
+    documents = []
 
     merged_columns = [
         'PART NO', 'MAKER', 'SEGMENT', 'APPLICATION',
@@ -34,115 +32,171 @@ def load_catalog(file_path: str) -> pd.DataFrame:
 
         available = [c for c in merged_columns if c in df.columns]
         df[available] = df[available].ffill()
-        df = df.fillna("N/A")
-        frames.append(df)
+        df = df.fillna('N/A')
 
-    return pd.concat(frames, ignore_index=True)
+        for idx, row in df.iterrows():
+            part_no = row.get('PART NO', 'N/A')
+            maker = row.get('MAKER', 'N/A')
+            model = row.get('MODEL', 'N/A')
+            app = row.get('APPLICATION', 'N/A')
+            part_type = row.get('TYPE', 'N/A')
+            mrp = row.get('MRP', 'N/A')
+            oem = row.get('OEM', 'N/A')
+            purolator = row.get('PUROLATOR', 'N/A')
+            pack_size = row.get('PACK SIZE', 'N/A')
+            engine_bs = row.get('ENGINE BS', 'N/A')
+            image_url = row.get('Image Link', 'N/A')
 
-df_catalog = load_catalog(EXCEL_FILE_PATH)
-
-# =========================================================
-# 2. Rule-Based Chatbot Search Engine
-# =========================================================
-def parse_and_search_catalog(query: str, df: pd.DataFrame):
-    """Direct multi-token keyword search across all catalog columns."""
-    q_clean = query.lower().strip()
-
-    # Broad listing check
-    if q_clean in ["all", "all parts", "list all", "show all", "catalog", "full catalog"]:
-        return f"📋 Displaying complete catalog ({len(df)} records):", df
-
-    search_cols = ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'OEM', 'PUROLATOR']
-    combined_text = df[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
-
-    stop_words = {
-        'for', 'the', 'in', 'of', 'and', 'a', 'is', 'price', 'mrp', 'cost',
-        'give', 'me', 'show', 'parts', 'part', 'filter', 'filters',
-        'what', 'which', 'tell', 'all', 'any', 'every', 'list', 'please'
-    }
-    tokens = [t for t in q_clean.split() if t not in stop_words]
-
-    if not tokens:
-        return f"📋 Displaying complete catalog ({len(df)} records):", df
-
-    mask = pd.Series(True, index=df.index)
-    for token in tokens:
-        mask = mask & combined_text.str.contains(token, na=False, regex=False)
-
-    results = df[mask]
-
-    if results.empty:
-        return (
-            "❌ **No matching parts found.**\n\n"
-            "Try searching by:\n"
-            "* **Car Model** (e.g., `Swift`, `Alto 800`, `Ciaz`, `Baleno`)\n"
-            "* **Application** (e.g., `Cabin Air`, `Oil`, `Fuel`)\n"
-            "* **Part Number** (e.g., `EK-2502`, `EK-1622`)\n"
-            "* **OEM Number** (e.g., `95861M74L00`)",
-            None
-        )
-
-    unique_parts = results['PART NO'].nunique()
-    msg = f"🔍 Found **{len(results)} matching entries** across **{unique_parts} unique Part Number(s)**:"
-    return msg, results
-
-
-def render_results_table(df_to_render: pd.DataFrame):
-    """Renders the DataFrame with inline image thumbnails."""
-    cols_to_show = [c for c in DISPLAY_COLUMNS if c in df_to_render.columns]
-    
-    st.dataframe(
-        df_to_render[cols_to_show],
-        column_config={
-            "Image Link": st.column_config.ImageColumn(
-                "Part Preview",
-                help="Double-click any thumbnail to view full size",
-                width="small"  # Options: "small", "medium", "large"
+            passage = (
+                f"Elofic Part Number: {part_no} | "
+                f"Vehicle Maker: {maker} | "
+                f"Applicable Model: {model} | "
+                f"Filter Application: {app} | "
+                f"Filter Type: {part_type} | "
+                f"Engine Standard: {engine_bs} | "
+                f"MRP: ₹{mrp} | "
+                f"Pack Size: {pack_size} | "
+                f"OEM Cross-Reference: {oem} | "
+                f"Purolator Cross-Reference: {purolator} | "
+                f"Image Link: {image_url}"
             )
-        },
-        use_container_width=True,
-        hide_index=True
+
+            documents.append({
+                "page_content": passage,
+                "metadata": {
+                    "part_no": str(part_no),
+                    "maker": str(maker),
+                    "model": str(model),
+                    "application": str(app),
+                    "mrp": str(mrp),
+                    "oem": str(oem),
+                    "image_url": str(image_url),
+                    "sheet_name": sheet_name,
+                    "row_index": int(idx)
+                }
+            })
+    return documents
+
+
+@st.cache_resource(show_spinner=False)
+def initialize_database():
+    """Builds and caches the vector database."""
+    embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name="all-MiniLM-L6-v2"
+    )
+    chroma_client = chromadb.PersistentClient(path=DB_PERSIST_PATH)
+    
+    collection = chroma_client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        embedding_function=embedding_fn,
+        metadata={"hnsw:space": "cosine"}
     )
 
-# =========================================================
-# 3. Streamlit Chat UI
-# =========================================================
-st.set_page_config(page_title="Elofic Catalog Bot", layout="wide")
-st.title("🤖 Elofic Catalog Chat Assistant")
-st.caption(f"Zero-LLM Local Chat Search • {len(df_catalog)} Total Parts Loaded")
+    if collection.count() == 0:
+        if not os.path.exists(EXCEL_FILE_PATH):
+            raise FileNotFoundError(f"Catalog file '{EXCEL_FILE_PATH}' not found.")
+        
+        docs = process_excel_to_documents(EXCEL_FILE_PATH)
+        ids = [f"doc_{idx}" for idx in range(len(docs))]
+        texts = [doc["page_content"] for doc in docs]
+        metadatas = [doc["metadata"] for doc in docs]
 
-# Initialize Chat History
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = [
+        batch_size = 64
+        for i in range(0, len(texts), batch_size):
+            collection.add(
+                ids=ids[i : i + batch_size],
+                documents=texts[i : i + batch_size],
+                metadatas=metadatas[i : i + batch_size]
+            )
+
+    return collection
+
+
+collection = initialize_database()
+
+# Load API key safely from Streamlit Secrets or Environment
+api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+if not api_key:
+    st.error("Please configure your `GEMINI_API_KEY` in Streamlit Secrets or .env file.")
+    st.stop()
+
+client = genai.Client(api_key=api_key)
+
+# =========================================================
+# 2. Conversational RAG Pipeline
+# =========================================================
+def query_conversational_rag(user_query: str, chat_history: List[Dict[str, str]], n_results: int = 8) -> str:
+    """
+    1. Uses dense embeddings to retrieve records (resilient to spelling mistakes).
+    2. Sends context to Gemini with conversational, human-centric formatting instructions.
+    """
+    # Semantic search handles typos automatically (e.g. 'swfit' -> 'Swift')
+    search_results = collection.query(
+        query_texts=[user_query],
+        n_results=n_results
+    )
+
+    retrieved_docs = search_results.get("documents", [[]])[0]
+    context = "\n".join(f"- {doc}" for doc in retrieved_docs) if retrieved_docs else "No matching catalog entries found."
+
+    # Conversational system prompt instructing natural text over raw tables
+    system_instruction = (
+        "You are an expert, helpful Elofic Auto Parts advisor. "
+        "Your goal is to assist customers naturally as a knowledgeable human specialist.\n\n"
+        "Guidelines:\n"
+        "1. Tolerate typos, misspellings, or informal vehicle names gracefully (e.g., 'swfit' -> Swift, 'alto' -> Alto 800/K10).\n"
+        "2. DO NOT output raw Markdown tables. Instead, respond in conversational prose, structured bullet points, and clear bold highlights.\n"
+        "3. When presenting a part, mention the Elofic Part Number, Applicable Model, Application (Oil, Cabin Air, Fuel, etc.), and MRP in ₹.\n"
+        "4. If an Image Link is available and not 'N/A', embed it as a markdown link: [View Part Image](URL).\n"
+        "5. If a requested part is not present in the catalog context, politely inform the user that it is unavailable and suggest closest alternatives."
+    )
+
+    prompt_content = f"Catalog Context:\n{context}\n\nCustomer Inquiry: {user_query}"
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt_content,
+        config={
+            "system_instruction": system_instruction,
+            "temperature": 0.2,
+        },
+    )
+    return response.text
+
+# =========================================================
+# 3. Streamlit Chat Interface
+# =========================================================
+st.set_page_config(page_title="Elofic Parts Advisor", layout="centered")
+st.title("💬 Elofic Auto Parts Advisor")
+st.caption("Ask anything about parts, prices, or car compatibility in plain English.")
+
+# Initialize message history in session state
+if "messages" not in st.session_state:
+    st.session_state.messages = [
         {
             "role": "assistant",
-            "text": "Hello! I can look up parts, prices (MRP), OEM numbers, and image links from the Elofic catalog. What are you looking for?",
-            "data": None
+            "content": "Hi there! I'm your Elofic parts specialist. Feel free to ask about any filter, vehicle model, or price (e.g., *'What is the price of an oil filter for Swift?'* or *'Cabin air filter for Alto 800'*)."
         }
     ]
 
-# Display Previous Messages
-for msg in st.session_state.chat_history:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["text"])
-        if msg["data"] is not None:
-            render_results_table(msg["data"])
+# Render conversation history
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-# Chat Input Handler
-if user_input := st.chat_input("Ask a question (e.g., 'All parts for Maruti', 'Swift cabin filter', 'EK-2506')..."):
-    st.session_state.chat_history.append({"role": "user", "text": user_input, "data": None})
+# User Chat Input
+if user_prompt := st.chat_input("Ask a question (e.g., 'cabin filter for swfit', 'part no for ciaz')..."):
+    st.session_state.messages.append({"role": "user", "content": user_prompt})
     with st.chat_message("user"):
-        st.markdown(user_input)
+        st.markdown(user_prompt)
 
     with st.chat_message("assistant"):
-        response_text, response_df = parse_and_search_catalog(user_input, df_catalog)
-        st.markdown(response_text)
-        
-        if response_df is not None:
-            render_results_table(response_df)
-
-        st.session_state.chat_history.append({
-            "role": "assistant",
-            "text": response_text,
-            "data": response_df
-        })
+        with st.spinner("Looking up parts..."):
+            try:
+                answer = query_conversational_rag(user_prompt, st.session_state.messages)
+                st.markdown(answer)
+                st.session_state.messages.append({"role": "assistant", "content": answer})
+            except Exception as e:
+                error_msg = f"Sorry, I encountered an issue retrieving that: {str(e)}"
+                st.error(error_msg)
+                st.session_state.messages.append({"role": "assistant", "content": error_msg})
