@@ -110,14 +110,15 @@ def health_check():
     return {"status": "ok", "loaded_rows": len(df_catalog)}
 
 @app.post("/whatsapp")
-async def whatsapp_webhook(Body: str = Form(...)):
+async def whatsapp_webhook(Body: str = Form(default="")):
     bot_reply, image_urls = query_llm(Body.strip())
     
     twiml = MessagingResponse()
-    msg = twiml.message(bot_reply)
+    msg = twiml.message()
+    msg.body(bot_reply)  # Explicitly set text body
 
-    # Attach the first relevant image preview if available
-    if image_urls:
-        msg.media(image_urls[0])
+    # Only attach media if a valid public image URL exists
+    if image_urls and str(image_urls[0]).startswith("http"):
+        msg.media(str(image_urls[0]).strip())
 
     return Response(content=str(twiml), media_type="application/xml")
