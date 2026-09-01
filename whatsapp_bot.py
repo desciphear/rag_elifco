@@ -30,7 +30,7 @@ def load_catalog():
     frames = []
     merged_cols = [
         'PART NO', 'MAKER', 'SEGMENT', 'APPLICATION',
-        'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'PUROLATOR', 'Image Link'
+        'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'Image Link'
     ]
     for _, df in excel_data.items():
         df = df.dropna(how="all")
@@ -48,7 +48,7 @@ df_catalog = load_catalog()
 # =========================================================
 def search_catalog_fast(query: str):
     q = query.lower().strip()
-    search_cols = ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'OEM', 'PUROLATOR']
+    search_cols = ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'OEM']
     combined = df_catalog[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
 
     stop_words = {'for', 'the', 'in', 'of', 'and', 'a', 'is', 'price', 'mrp', 'cost', 'give', 'me', 'show', 'parts', 'filter', 'filters'}
