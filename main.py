@@ -29,7 +29,7 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
 
     merged_columns = [
         'PART NO', 'MAKER', 'SEGMENT', 'APPLICATION',
-        'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'PUROLATOR', 'Image Link'
+        'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'OEM','PUROLATOR', 'Image Link'
     ]
 
     for sheet_name, df in excel_data.items():
@@ -142,7 +142,7 @@ def get_comprehensive_context(query: str) -> str:
         tokens = q_lower.split()
 
     # Search in DataFrame
-    search_cols = ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE']
+    search_cols = ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE','OEM']
     combined_series = df_catalog[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
     
     mask = pd.Series(True, index=df_catalog.index)
@@ -157,6 +157,7 @@ def get_comprehensive_context(query: str) -> str:
             'TYPE': 'first',
             'MRP': 'first',
             'MODEL': lambda x: ', '.join(x.unique()),
+            'OEM': 'first',
             'Image Link': 'first'
         }).reset_index()
 
