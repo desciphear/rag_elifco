@@ -215,14 +215,14 @@ def stream_conversational_rag(user_query: str):
 
     prompt_content = f"Catalog Context:\n{context}\n\nCustomer Inquiry: {user_query}"
 
-stream = client.chat.completions.create(
+    stream = client.chat.completions.create(
         model=OPENROUTER_MODEL,
         messages=[
             {"role": "system", "content": system_instruction},
             {"role": "user", "content": prompt_content},
         ],
         temperature=0.1,
-        max_tokens=1500,  # <-- ADD THIS LINE (limits token reservation)
+        max_tokens=1500,
         stream=True,
     )
 
