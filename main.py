@@ -166,7 +166,7 @@ def get_comprehensive_context(query: str) -> str:
             img_val = str(row.get('Image Link', '')).strip()
             img_str = f" | Image: {img_val}" if img_val.startswith("http") else " | Image: N/A"
             items.append(
-                f"- **Part No:** {row['PART NO']} | **App:** {row['APPLICATION']} | "
+                f"- **Part No:** {row['PART NO']} | **OEM** {row['OEM']} | **App:** {row['APPLICATION']} | "
                 f"**MRP:** ₹{row['MRP']} | **Models:** {row['MODEL']}{img_str}"
             )
         return f"Found {len(grouped)} distinct Part Numbers:\n" + "\n".join(items)
@@ -198,7 +198,7 @@ def stream_conversational_rag(user_query: str):
     "1. DO NOT truncate or omit any matching parts from the context.\n"
     "2. MANDATORY IMAGE RENDERING: For EVERY part that has an Image URL (starting with http), you MUST render it inline immediately below the part details using Markdown format: ![Part Preview](URL). Never output plain text URLs or skip the image.\n"
     "3. DO NOT use Markdown tables. Use bullet points with bold highlights.\n"
-    "4. For each part, include: Part Number, Applicable Models, Application, MRP in ₹, and the rendered image.\n"
+    "4. For each part, include: Part Number, Applicable Models, Application, OEM ,MRP in ₹, and the rendered image.\n"
     "5. If a part has no valid image link (or is 'N/A'), omit the image markdown for that part.\n"
     "6. Be concise, friendly, and helpful."
     )
