@@ -88,17 +88,16 @@ def parse_and_search_catalog(query: str, df: pd.DataFrame):
 
 
 def render_results_table(df_to_render: pd.DataFrame):
-    """Renders the DataFrame with Image Link column as a clickable link."""
+    """Renders the DataFrame with inline image thumbnails."""
     cols_to_show = [c for c in DISPLAY_COLUMNS if c in df_to_render.columns]
     
     st.dataframe(
         df_to_render[cols_to_show],
         column_config={
-            "Image Link": st.column_config.LinkColumn(
-                "Image Link",
-                help="Click to open part image",
-                validate="^https?://",
-                max_chars=40
+            "Image Link": st.column_config.ImageColumn(
+                "Part Preview",
+                help="Double-click any thumbnail to view full size",
+                width="small"  # Options: "small", "medium", "large"
             )
         },
         use_container_width=True,
