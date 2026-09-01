@@ -12,7 +12,7 @@ from typing import Any, Dict, List
 EXCEL_FILE_PATH = "Elofic AI Agent Data.xlsx"
 COLLECTION_NAME = "elofic_catalog"
 DB_PERSIST_PATH = "./elofic_vectordb"
-OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
+OPENROUTER_MODEL = "google/gemini-2.5-flash"
 
 # =========================================================
 # 1. Parsing & Indexing Logic
@@ -215,13 +215,14 @@ def stream_conversational_rag(user_query: str):
 
     prompt_content = f"Catalog Context:\n{context}\n\nCustomer Inquiry: {user_query}"
 
-    stream = client.chat.completions.create(
+stream = client.chat.completions.create(
         model=OPENROUTER_MODEL,
         messages=[
             {"role": "system", "content": system_instruction},
             {"role": "user", "content": prompt_content},
         ],
         temperature=0.1,
+        max_tokens=1500,  # <-- ADD THIS LINE (limits token reservation)
         stream=True,
     )
 
