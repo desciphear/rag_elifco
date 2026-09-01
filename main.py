@@ -132,59 +132,48 @@ client = OpenAI(
 # 2. Comprehensive Context Retriever
 # =========================================================
 def get_comprehensive_context(query: str) -> str:
-    """
-    Guarantees that ALL matching parts are retrieved:
-    - If user asks broad categorical queries ('oil filter', 'cabin', 'maruti', 'all'),
-      filters the entire dataset and aggregates models by Part Number.
-    - If specific, uses semantic vector search.
-    """
     q_lower = query.lower()
 
-    # Detect broad categorical filters
-    categories = {
-        "cabin": "CABIN",
-        "oil": "OIL",
-        "fuel": "FUEL",
-        "air": "AIR",
-        "maruti": "MARUTI",
-    }
+    # Match ANY keyword against Part No, Maker, Model, Application, or Type
+    # This ensures "esteem filter", "swift oil", etc. all get complete structured data with image links
+    tokens = [t.strip() for t in q_lower.split() if t not in ['for', 'the', 'in', 'of', 'and', 'filter', 'filters', 'parts', 'show', 'give', 'me', 'price']]
     
-    matched_categories = [cat_key for cat_key, col_val in categories.items() if cat_key in q_lower]
-    is_broad_query = bool(matched_categories) or any(w in q_lower for w in ["all", "every", "list", "total", "catalog"])
+    if not tokens:
+        tokens = q_lower.split()
 
-    if is_broad_query:
-        df_matched = df_catalog.copy()
+    # Search in DataFrame
+    search_cols = ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE']
+    combined_series = df_catalog[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
+    
+    mask = pd.Series(True, index=df_catalog.index)
+    for t in tokens:
+        mask = mask & combined_series.str.contains(t, na=False, regex=False)
 
-        if "cabin" in q_lower:
-            df_matched = df_matched[df_matched['APPLICATION'].str.upper().str.contains('CABIN', na=False)]
-        elif "oil" in q_lower:
-            df_matched = df_matched[df_matched['APPLICATION'].str.upper().str.contains('OIL', na=False)]
-        elif "fuel" in q_lower:
-            df_matched = df_matched[df_matched['APPLICATION'].str.upper().str.contains('FUEL', na=False)]
-        elif "air" in q_lower:
-            df_matched = df_matched[df_matched['APPLICATION'].str.upper().str.contains('AIR', na=False)]
-            
-        if "maruti" in q_lower:
-            df_matched = df_matched[df_matched['MAKER'].str.upper().str.contains('MARUTI', na=False)]
+    df_matched = df_catalog[mask]
 
-        if not df_matched.empty:
-            # Group by Part Number to consolidate models compactly for the LLM
-            grouped = df_matched.groupby('PART NO').agg({
-                'APPLICATION': 'first',
-                'TYPE': 'first',
-                'MRP': 'first',
-                'MODEL': lambda x: ', '.join(x.unique()),
-                'Image Link': 'first'
-            }).reset_index()
+    if not df_matched.empty:
+        grouped = df_matched.groupby('PART NO').agg({
+            'APPLICATION': 'first',
+            'TYPE': 'first',
+            'MRP': 'first',
+            'MODEL': lambda x: ', '.join(x.unique()),
+            'Image Link': 'first'
+        }).reset_index()
 
-            items = []
-            for _, row in grouped.iterrows():
-                img = f" | Image: {row['Image Link']}" if row.get('Image Link') and row.get('Image Link') != "N/A" else ""
-                items.append(
-                    f"- **Part No:** {row['PART NO']} | **App:** {row['APPLICATION']} | **MRP:** ₹{row['MRP']} | "
-                    f"**Models:** {row['MODEL']}{img}"
-                )
-            return f"Found {len(grouped)} distinct Part Numbers ({len(df_matched)} vehicle applications):\n" + "\n".join(items)
+        items = []
+        for _, row in grouped.iterrows():
+            img_val = str(row.get('Image Link', '')).strip()
+            img_str = f" | Image: {img_val}" if img_val.startswith("http") else " | Image: N/A"
+            items.append(
+                f"- **Part No:** {row['PART NO']} | **App:** {row['APPLICATION']} | "
+                f"**MRP:** ₹{row['MRP']} | **Models:** {row['MODEL']}{img_str}"
+            )
+        return f"Found {len(grouped)} distinct Part Numbers:\n" + "\n".join(items)
+
+    # Fallback to vector search if no direct keyword match
+    search_results = collection.query(query_texts=[query], n_results=8)
+    retrieved_docs = search_results.get("documents", [[]])[0]
+    return "\n".join(f"- {doc}" for doc in retrieved_docs) if retrieved_docs else "No matching catalog records found."
 
     # Fallback to Semantic Vector Search for targeted queries
     search_results = collection.query(
@@ -203,14 +192,14 @@ def stream_conversational_rag(user_query: str):
     context = get_comprehensive_context(user_query)
 
     system_instruction = (
-        "You are an expert, helpful Elofic Auto Parts advisor. "
-        "Answer naturally and conversationally using ONLY the provided catalog context.\n\n"
-        "Rules:\n"
-        "1. DO NOT truncate or leave out parts. If the context contains multiple parts, list all of them.\n"
-        "2. DO NOT use raw Markdown tables. Use conversational paragraphs and organized bullet points with bold highlights.\n"
-        "3. For each part, include Part Number, Applicable Models, Application, and MRP in ₹.\n"
-        "4. If an image link exists and is not 'N/A', render it directly as an image: ![Part Preview](URL).\n"
-        "5. Be concise, friendly, and helpful."
+    "You are an expert, helpful Elofic Auto Parts advisor.\n\n"
+    "CRITICAL RULES:\n"
+    "1. DO NOT truncate or omit any matching parts from the context.\n"
+    "2. MANDATORY IMAGE RENDERING: For EVERY part that has an Image URL (starting with http), you MUST render it inline immediately below the part details using Markdown format: ![Part Preview](URL). Never output plain text URLs or skip the image.\n"
+    "3. DO NOT use Markdown tables. Use bullet points with bold highlights.\n"
+    "4. For each part, include: Part Number, Applicable Models, Application, MRP in ₹, and the rendered image.\n"
+    "5. If a part has no valid image link (or is 'N/A'), omit the image markdown for that part.\n"
+    "6. Be concise, friendly, and helpful."
     )
 
     prompt_content = f"Catalog Context:\n{context}\n\nCustomer Inquiry: {user_query}"
