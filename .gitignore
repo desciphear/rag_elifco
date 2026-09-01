@@ -1,0 +1,11 @@
+# Ignore API keys and environment files
+.env
+.env.*
+.streamlit/secrets.toml
+
+# Ignore vector database folder
+elofic_vectordb/
+
+# Ignore Python cache
+__pycache__/
+*.pyc
