@@ -3,7 +3,7 @@ import chromadb
 import pandas as pd
 import streamlit as st
 from chromadb.utils import embedding_functions
-from google import genai
+from openai import OpenAI
 from typing import Any, Dict, List
 
 # =========================================================
@@ -12,6 +12,9 @@ from typing import Any, Dict, List
 EXCEL_FILE_PATH = "Elofic AI Agent Data.xlsx"
 COLLECTION_NAME = "elofic_catalog"
 DB_PERSIST_PATH = "./elofic_vectordb"
+
+# Model selection on OpenRouter (e.g., google/gemini-2.5-flash, google/gemini-2.0-flash-001, anthropic/claude-3.5-haiku)
+OPENROUTER_MODEL = "nvidia/nemotron-3.5-lightning:free"
 
 # =========================================================
 # 1. Parsing & Indexing Logic
@@ -114,23 +117,25 @@ def initialize_database():
 
 collection = initialize_database()
 
-# Load API key safely from Streamlit Secrets or Environment
-api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+# Initialize OpenRouter Client
+api_key = st.secrets.get("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
 if not api_key:
-    st.error("Please configure your `GEMINI_API_KEY` in Streamlit Secrets or .env file.")
+    st.error("Please configure your `OPENROUTER_API_KEY` in Streamlit Secrets or .env file.")
     st.stop()
 
-client = genai.Client(api_key=api_key)
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=api_key
+)
 
 # =========================================================
-# 2. Conversational RAG Pipeline
+# 2. Conversational RAG Pipeline via OpenRouter
 # =========================================================
-def query_conversational_rag(user_query: str, chat_history: List[Dict[str, str]], n_results: int = 8) -> str:
+def query_conversational_rag(user_query: str, n_results: int = 8) -> str:
     """
-    1. Uses dense embeddings to retrieve records (resilient to spelling mistakes).
-    2. Sends context to Gemini with conversational, human-centric formatting instructions.
+    1. Vector retrieval resolves typos and informal names (e.g., 'swfit' -> Swift).
+    2. OpenRouter passes context to the LLM to format answers naturally.
     """
-    # Semantic search handles typos automatically (e.g. 'swfit' -> 'Swift')
     search_results = collection.query(
         query_texts=[user_query],
         n_results=n_results
@@ -139,7 +144,6 @@ def query_conversational_rag(user_query: str, chat_history: List[Dict[str, str]]
     retrieved_docs = search_results.get("documents", [[]])[0]
     context = "\n".join(f"- {doc}" for doc in retrieved_docs) if retrieved_docs else "No matching catalog entries found."
 
-    # Conversational system prompt instructing natural text over raw tables
     system_instruction = (
         "You are an expert, helpful Elofic Auto Parts advisor. "
         "Your goal is to assist customers naturally as a knowledgeable human specialist.\n\n"
@@ -148,34 +152,33 @@ def query_conversational_rag(user_query: str, chat_history: List[Dict[str, str]]
         "2. DO NOT output raw Markdown tables. Instead, respond in conversational prose, structured bullet points, and clear bold highlights.\n"
         "3. When presenting a part, mention the Elofic Part Number, Applicable Model, Application (Oil, Cabin Air, Fuel, etc.), and MRP in ₹.\n"
         "4. If an Image Link is available and not 'N/A', embed it as a markdown link: [View Part Image](URL).\n"
-        "5. If a requested part is not present in the catalog context, politely inform the user that it is unavailable and suggest closest alternatives."
+        "5. If a requested part is not present in the catalog context, politely inform the user that it is unavailable."
     )
 
     prompt_content = f"Catalog Context:\n{context}\n\nCustomer Inquiry: {user_query}"
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt_content,
-        config={
-            "system_instruction": system_instruction,
-            "temperature": 0.2,
-        },
+    response = client.chat.completions.create(
+        model=OPENROUTER_MODEL,
+        messages=[
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": prompt_content},
+        ],
+        temperature=0.2,
     )
-    return response.text
+    return response.choices[0].message.content
 
 # =========================================================
 # 3. Streamlit Chat Interface
 # =========================================================
 st.set_page_config(page_title="Elofic Parts Advisor", layout="centered")
 st.title("💬 Elofic Auto Parts Advisor")
-st.caption("Ask anything about parts, prices, or car compatibility in plain English.")
+st.caption("Powered by OpenRouter • Ask about parts, compatibility, or prices in plain English.")
 
-# Initialize message history in session state
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {
             "role": "assistant",
-            "content": "Hi there! I'm your Elofic parts specialist. Feel free to ask about any filter, vehicle model, or price (e.g., *'What is the price of an oil filter for Swift?'* or *'Cabin air filter for Alto 800'*)."
+            "content": "Hi there! I'm your Elofic parts specialist. Ask me anything about parts, prices, or car compatibility (e.g., *'What is the oil filter price for Swift?'* or *'Cabin air filter for Alto 800'*)."
         }
     ]
 
@@ -193,10 +196,10 @@ if user_prompt := st.chat_input("Ask a question (e.g., 'cabin filter for swfit',
     with st.chat_message("assistant"):
         with st.spinner("Looking up parts..."):
             try:
-                answer = query_conversational_rag(user_prompt, st.session_state.messages)
+                answer = query_conversational_rag(user_prompt)
                 st.markdown(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
             except Exception as e:
-                error_msg = f"Sorry, I encountered an issue retrieving that: {str(e)}"
+                error_msg = f"Sorry, I encountered an issue: {str(e)}"
                 st.error(error_msg)
                 st.session_state.messages.append({"role": "assistant", "content": error_msg})
