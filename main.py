@@ -10,10 +10,8 @@ from typing import Any, Dict, List
 # =========================================================
 # Configuration
 # =========================================================
-DEFAULT_FILES = ["Data for AI Agent  19-09-2026.xls"]
-EXCEL_FILE_PATH = next((f for f in DEFAULT_FILES if os.path.exists(f)), "Data for AI Agent  19-09-2026.xls")
-
-COLLECTION_NAME = "elofic_catalog_v2"
+EXCEL_FILE_PATH = "Data for AI Agent  19-09-2026.xls"
+COLLECTION_NAME = "elofic_catalog_v3"
 DB_PERSIST_PATH = "./elofic_vectordb"
 OPENROUTER_MODEL = "google/gemini-2.5-flash"
 
@@ -22,7 +20,6 @@ OPENROUTER_MODEL = "google/gemini-2.5-flash"
 # =========================================================
 @st.cache_data
 def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
-    """Loads all sheets, normalizes columns, forward-fills merged cells, and cleans DataFrame."""
     if not os.path.exists(file_path):
         st.error(f"Catalog file '{file_path}' not found.")
         st.stop()
@@ -36,60 +33,48 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
 
         if 'OEM Number' in df.columns and 'OEM' not in df.columns:
             df['OEM'] = df['OEM Number']
+        elif 'OEM' in df.columns and 'OEM Number' not in df.columns:
+            df['OEM Number'] = df['OEM']
+
         if 'IMAGE LINK' in df.columns and 'Image Link' not in df.columns:
             df['Image Link'] = df['IMAGE LINK']
+        elif 'Image Link' in df.columns and 'IMAGE LINK' not in df.columns:
+            df['IMAGE LINK'] = df['Image Link']
+
         if 'Nishtha Points' not in df.columns:
             df['Nishtha Points'] = "N/A"
         if 'PACK SIZE' not in df.columns:
             df['PACK SIZE'] = "N/A"
 
-        merged_columns = [
-            'PART NO', 'MAKER', 'SEGMENT', 'APPLICATION',
-            'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'Nishtha Points',
-            'OEM', 'PUROLATOR', 'MAHLE', 'SOFIMA', 'BOSCH', 'Image Link'
-        ]
-
-        available = [c for c in merged_columns if c in df.columns]
-        df[available] = df[available].ffill()
-        df = df.fillna("N/A")
+        df = df.ffill().fillna("N/A")
         frames.append(df)
 
     return pd.concat(frames, ignore_index=True)
 
 def build_documents_from_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Converts rows to descriptive text passages for semantic search."""
     documents = []
+    excluded_cols = {'Image Link', 'IMAGE LINK'}
+    all_cols = [c for c in df.columns if c not in excluded_cols]
+
     for idx, row in df.iterrows():
         part_no = row.get('PART NO', 'N/A')
-        maker = row.get('MAKER', 'N/A')
-        model = row.get('MODEL', 'N/A')
-        app = row.get('APPLICATION', 'N/A')
-        part_type = row.get('TYPE', 'N/A')
-        mrp = row.get('MRP', 'N/A')
-        pack_size = str(row.get('PACK SIZE', 'N/A')).replace('.0', '')
-        nishtha_pts = str(row.get('Nishtha Points', 'N/A')).replace('.0', '')
-        oem = row.get('OEM', 'N/A')
-        purolator = row.get('PUROLATOR', 'N/A')
         image_link = row.get('Image Link', 'N/A')
 
-        passage = (
-            f"Elofic Part: {part_no} | Maker: {maker} | Model: {model} | "
-            f"Application: {app} | Type: {part_type} | MRP: ₹{mrp} | "
-            f"Pack Size: {pack_size} | Nishtha Loyalty Points: {nishtha_pts} | "
-            f"OEM: {oem} | Purolator: {purolator} | Image: {image_link}"
-        )
+        # Dynamically build passage from all columns
+        passage_parts = [f"{col}: {row.get(col, 'N/A')}" for col in all_cols]
+        passage = f"Elofic Part: {part_no} | " + " | ".join(passage_parts) + f" | Image: {image_link}"
 
         documents.append({
             "page_content": passage,
             "metadata": {
                 "part_no": str(part_no),
-                "maker": str(maker),
-                "model": str(model),
-                "application": str(app),
-                "mrp": str(mrp),
-                "pack_size": str(pack_size),
-                "nishtha_points": str(nishtha_pts),
-                "oem": str(oem),
+                "maker": str(row.get('MAKER', 'N/A')),
+                "model": str(row.get('MODEL', 'N/A')),
+                "application": str(row.get('APPLICATION', 'N/A')),
+                "mrp": str(row.get('MRP', 'N/A')),
+                "pack_size": str(row.get('PACK SIZE', 'N/A')),
+                "nishtha_points": str(row.get('Nishtha Points', 'N/A')),
+                "oem": str(row.get('OEM', 'N/A')),
                 "image_link": str(image_link),
                 "row_index": int(idx)
             }
@@ -98,7 +83,6 @@ def build_documents_from_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
 
 @st.cache_resource(show_spinner=False)
 def initialize_database():
-    """Initializes ChromaDB vector store with the versioned collection."""
     embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name="all-MiniLM-L6-v2"
     )
@@ -173,10 +157,11 @@ def extract_numeric_filters(query_lower: str):
 
 
 def get_comprehensive_context(query: str) -> str:
-    q_lower = query.lower()
+    q_lower = query.lower().strip()
     (pack_op, pack_val), (pts_op, pts_val) = extract_numeric_filters(q_lower)
 
     df_filtered = df_catalog.copy()
+
     if pack_op and pack_val is not None:
         numeric_pack = pd.to_numeric(df_filtered['PACK SIZE'], errors='coerce').fillna(0)
         if pack_op == '>':
@@ -203,10 +188,13 @@ def get_comprehensive_context(query: str) -> str:
     }
     tokens = [t.strip() for t in q_lower.split() if t not in stop_words and not t.isdigit()]
 
+    # Make ALL columns searchable
+    excluded_cols = {'Image Link', 'IMAGE LINK'}
+    search_cols = [c for c in df_filtered.columns if c not in excluded_cols]
+    combined_series = df_filtered[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
+    
+    mask = pd.Series(True, index=df_filtered.index)
     if tokens:
-        search_cols = [c for c in ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'OEM', 'PUROLATOR', 'MAHLE', 'BOSCH'] if c in df_filtered.columns]
-        combined_series = df_filtered[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
-        mask = pd.Series(True, index=df_filtered.index)
         for t in tokens:
             mask = mask & combined_series.str.contains(t, na=False, regex=False)
         df_filtered = df_filtered[mask]
@@ -230,10 +218,13 @@ def get_comprehensive_context(query: str) -> str:
             models_display = row['MODEL'] if row['MODEL'] else 'Universal / Standard'
             pack_sz = str(row.get('PACK SIZE', 'N/A')).replace('.0', '')
             pts = str(row.get('Nishtha Points', 'N/A')).replace('.0', '')
+            oem_val = str(row.get('OEM', 'N/A')).strip()
+            if oem_val in ['nan', 'None', '', 'N/A']:
+                oem_val = "Not Specified"
 
             items.append(
-                f"- **Part No:** **{row['PART NO']}** | **Pack Size:** {pack_sz} | **MRP:** ₹{row['MRP']} | "
-                f"**Nishtha Points:** {pts} | **App:** {row['APPLICATION']} | "
+                f"- **Part No:** {row['PART NO']} | **OEM:** {oem_val} | **App:** {row['APPLICATION']} | "
+                f"**MRP:** ₹{row['MRP']} | **Pack Size:** {pack_sz} | **Nishtha Points:** {pts} | "
                 f"**Models:** {models_display}{img_str}"
             )
         return f"Found {len(grouped)} matching Part Numbers:\n" + "\n".join(items)
@@ -254,9 +245,9 @@ def stream_conversational_rag(user_query: str):
         "1. DO NOT truncate or omit matching parts from the context. Present all parts returned in the Catalog Context.\n"
         "2. MANDATORY IMAGE RENDERING: For EVERY part that has an Image URL (starting with http), you MUST render it inline immediately below the part details using Markdown format: ![Part Preview](URL).\n"
         "3. DO NOT use Markdown tables. Use clean bullet points with bold highlights.\n"
-        "4. For each part, include: Part Number, Pack Size, MRP in ₹, Nishtha Points, Application, OEM, Compatible Models, and the rendered image.\n"
+        "4. For each part, include: Part Number, OEM Number, Pack Size, MRP in ₹, Nishtha Points, Application, Compatible Models, and the rendered image.\n"
         "5. If a part has no valid image link (or is 'N/A'), omit the image markdown for that part.\n"
-        "6. Answer accurately based on the catalog context."
+        "6. If the user asks to filter or compare (e.g. 'pack size greater than 50'), evaluate the parts in the context and present only the matching ones."
     )
 
     prompt_content = f"Catalog Context:\n{context}\n\nCustomer Inquiry: {user_query}"
@@ -295,7 +286,7 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if user_prompt := st.chat_input("Ask a question (e.g., 'parts where pack size is 100', 'parts where pack size is greater than 100')..."):
+if user_prompt := st.chat_input("Ask a question (e.g., 'Alto filters', 'parts where pack size is 100', 'BOSCH 9451037404')..."):
     st.session_state.messages.append({"role": "user", "content": user_prompt})
     with st.chat_message("user"):
         st.markdown(user_prompt)
