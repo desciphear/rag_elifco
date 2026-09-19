@@ -13,7 +13,7 @@ from typing import Any, Dict, List
 EXCEL_FILE_PATH = "Data for AI Agent  19-09-2026.xls"
 COLLECTION_NAME = "elofic_catalog_v3"
 DB_PERSIST_PATH = "./elofic_vectordb"
-OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+OPENROUTER_MODEL = "deepseek/deepseek-v4-flash-0731:free"
 
 # =========================================================
 # 1. Parsing & Indexing Logic
