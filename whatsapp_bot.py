@@ -25,10 +25,10 @@ client = OpenAI(
 )
 
 # =========================================================
-# 1. Parsing & Indexing Logic
+# 1. Parsing & Cleaning Catalog Data
 # =========================================================
 def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
-    """Loads all sheets, normalizes columns, forward-fills merged cells, and cleans DataFrame."""
+    """Loads all sheets, normalizes column names, forward-fills merged values, and standardizes numbers."""
     if not os.path.exists(file_path):
         print(f"Catalog file '{file_path}' not found.")
         return pd.DataFrame()
@@ -40,18 +40,20 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
         df = df.dropna(how="all")
         df.columns = [str(col).strip() for col in df.columns]
 
-        # Standardize column naming variations across file versions
+        # Standardize column variations across different Excel versions
         if 'OEM Number' in df.columns and 'OEM' not in df.columns:
             df['OEM'] = df['OEM Number']
         if 'IMAGE LINK' in df.columns and 'Image Link' not in df.columns:
             df['Image Link'] = df['IMAGE LINK']
         if 'Nishtha Points' not in df.columns:
             df['Nishtha Points'] = "N/A"
+        if 'PACK SIZE' not in df.columns:
+            df['PACK SIZE'] = "N/A"
 
         merged_columns = [
             'PART NO', 'MAKER', 'SEGMENT', 'APPLICATION',
             'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'Nishtha Points',
-            'OEM', 'PUROLATOR', 'MAHLE', 'BOSCH', 'Image Link'
+            'OEM', 'PUROLATOR', 'MAHLE', 'SOFIMA', 'BOSCH', 'Image Link'
         ]
 
         available = [c for c in merged_columns if c in df.columns]
@@ -64,34 +66,87 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
 df_catalog = load_and_clean_dataframe(EXCEL_FILE_PATH)
 
 # =========================================================
-# 2. Comprehensive Context Retriever (Search Logic)
+# 2. Context Retrieval with Strict Numerical Logic
 # =========================================================
+def extract_numeric_filters(query_lower: str):
+    """Detects equality and comparative filters for pack size and Nishtha points."""
+    pack_op, pack_val = None, None
+    m_gt = re.search(r'(?:pack\s*size|pack)\s*(?:is\s*)?(?:>|>=|greater than|more than|above|over)\s*(\d+)', query_lower)
+    m_lt = re.search(r'(?:pack\s*size|pack)\s*(?:is\s*)?(?:<|<=|less than|under|below)\s*(\d+)', query_lower)
+    m_eq = re.search(r'(?:pack\s*size|pack)\s*(?:is\s*|equals?\s*|=|:\s*)?(\d+)', query_lower)
+
+    if m_gt:
+        pack_op, pack_val = '>', int(m_gt.group(1))
+    elif m_lt:
+        pack_op, pack_val = '<', int(m_lt.group(1))
+    elif m_eq:
+        pack_op, pack_val = '==', int(m_eq.group(1))
+
+    pts_op, pts_val = None, None
+    p_gt = re.search(r'(?:nishtha\s*points?|points?)\s*(?:is\s*)?(?:>|>=|greater than|more than|above|over)\s*(\d+)', query_lower)
+    p_lt = re.search(r'(?:nishtha\s*points?|points?)\s*(?:is\s*)?(?:<|<=|less than|under|below)\s*(\d+)', query_lower)
+    p_eq = re.search(r'(?:nishtha\s*points?|points?)\s*(?:is\s*|equals?\s*|=|:\s*)?(\d+)', query_lower)
+
+    if p_gt:
+        pts_op, pts_val = '>', int(p_gt.group(1))
+    elif p_lt:
+        pts_op, pts_val = '<', int(p_lt.group(1))
+    elif p_eq:
+        pts_op, pts_val = '==', int(p_eq.group(1))
+
+    return (pack_op, pack_val), (pts_op, pts_val)
+
+
 def get_comprehensive_context(query: str):
     if df_catalog.empty:
         return "Catalog data unavailable.", []
 
     q_lower = query.lower()
-    stop_words = {'for', 'the', 'in', 'of', 'and', 'filter', 'filters', 'parts', 'show', 'give', 'me', 'price'}
-    tokens = [t.strip() for t in q_lower.split() if t not in stop_words] or q_lower.split()
+    (pack_op, pack_val), (pts_op, pts_val) = extract_numeric_filters(q_lower)
 
-    search_cols = [
-        c for c in [
-            'PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 
-            'OEM', 'PUROLATOR', 'MAHLE', 'BOSCH', 'PACK SIZE', 'Nishtha Points'
-        ] if c in df_catalog.columns
-    ]
-    combined_series = df_catalog[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
-    
-    mask = pd.Series(True, index=df_catalog.index)
-    for t in tokens:
-        mask = mask & combined_series.str.contains(t, na=False, regex=False)
+    # Filter by Pack Size
+    df_filtered = df_catalog.copy()
+    if pack_op and pack_val is not None:
+        numeric_pack = pd.to_numeric(df_filtered['PACK SIZE'], errors='coerce').fillna(0)
+        if pack_op == '>':
+            df_filtered = df_filtered[numeric_pack > pack_val]
+        elif pack_op == '<':
+            df_filtered = df_filtered[numeric_pack < pack_val]
+        elif pack_op == '==':
+            df_filtered = df_filtered[numeric_pack == pack_val]
 
-    df_matched = df_catalog[mask]
-    if df_matched.empty:
-        df_matched = df_catalog.head(6)
+    # Filter by Nishtha Points
+    if pts_op and pts_val is not None:
+        numeric_pts = pd.to_numeric(df_filtered['Nishtha Points'], errors='coerce').fillna(0)
+        if pts_op == '>':
+            df_filtered = df_filtered[numeric_pts > pts_val]
+        elif pts_op == '<':
+            df_filtered = df_filtered[numeric_pts < pts_val]
+        elif pts_op == '==':
+            df_filtered = df_filtered[numeric_pts == pts_val]
 
-    # Group by PART NO to prevent duplicate images and duplicate parts
-    grouped = df_matched.groupby('PART NO').agg({
+    # Keyword Search (for vehicle models, makers, parts, etc.)
+    stop_words = {
+        'get', 'all', 'where', 'for', 'the', 'in', 'of', 'and', 'filter', 'filters', 'parts', 
+        'show', 'give', 'me', 'price', 'pack', 'size', 'points', 'nishtha',
+        'greater', 'than', 'more', 'less', 'above', 'below', 'with', 'having',
+        'is', 'are', 'what', 'which', 'can', 'you', 'find', 'item', 'items'
+    }
+    tokens = [t.strip() for t in q_lower.split() if t not in stop_words and not t.isdigit()]
+
+    if tokens:
+        search_cols = [c for c in ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'OEM', 'PUROLATOR', 'MAHLE', 'BOSCH'] if c in df_filtered.columns]
+        combined_series = df_filtered[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
+        mask = pd.Series(True, index=df_filtered.index)
+        for t in tokens:
+            mask = mask & combined_series.str.contains(t, na=False, regex=False)
+        df_filtered = df_filtered[mask]
+
+    if df_filtered.empty:
+        return "No matching parts found matching the specified criteria in the catalog.", []
+
+    # Group by PART NO to prevent duplicates
+    grouped = df_filtered.groupby('PART NO').agg({
         'APPLICATION': 'first',
         'TYPE': 'first',
         'MRP': 'first',
@@ -104,7 +159,8 @@ def get_comprehensive_context(query: str):
 
     items = []
     unique_images = []
-    for _, row in grouped.iterrows():
+    # Include up to 25 items so large lists aren't truncated
+    for _, row in grouped.head(25).iterrows():
         img_val = str(row.get('Image Link', '')).strip()
         has_image = img_val.startswith("http")
         if has_image and img_val not in unique_images:
@@ -112,18 +168,15 @@ def get_comprehensive_context(query: str):
 
         img_str = f" | Image: {img_val}" if has_image else " | Image: N/A"
         models_display = row['MODEL'] if row['MODEL'] else 'Universal / Standard'
-        
-        # Clean formatting for points and pack size
-        nishtha_pts = str(row.get('Nishtha Points', 'N/A')).replace('.0', '')
         pack_sz = str(row.get('PACK SIZE', 'N/A')).replace('.0', '')
+        nishtha_pts = str(row.get('Nishtha Points', 'N/A')).replace('.0', '')
 
         items.append(
-            f"- *Part No:* {row['PART NO']} | *OEM:* {row['OEM']} | *App:* {row['APPLICATION']} | "
-            f"*MRP:* ₹{row['MRP']} | *Pack Size:* {pack_sz} | *Nishtha Points:* {nishtha_pts} | "
-            f"*Models:* {models_display}{img_str}"
+            f"- *Part No:* {row['PART NO']} | *Pack Size:* {pack_sz} | *MRP:* ₹{row['MRP']} | "
+            f"*Nishtha Points:* {nishtha_pts} | *App:* {row['APPLICATION']} | *Models:* {models_display}{img_str}"
         )
 
-    context_str = f"Found {len(grouped)} distinct Part Numbers:\n" + "\n".join(items)
+    context_str = f"Found {len(grouped)} matching Part Numbers:\n" + "\n".join(items)
     return context_str, unique_images
 
 # =========================================================
@@ -132,13 +185,17 @@ def get_comprehensive_context(query: str):
 def get_bot_reply(user_query: str):
     context, image_urls = get_comprehensive_context(user_query)
 
+    if context.startswith("No matching parts found"):
+        return context, []
+
     system_instruction = (
         "You are an expert Elofic Auto Parts advisor on WhatsApp.\n\n"
         "FORMATTING RULES:\n"
-        "1. Answer concisely using WhatsApp Markdown (*bold* with single asterisks, no double asterisks **).\n"
-        "2. For each distinct part, clearly list: Part Number, Compatible Models, Application, OEM, MRP in ₹, Pack Size, and Nishtha Points.\n"
-        "3. DO NOT output markdown image tags like ![img](url). Just present clean text information.\n"
-        "4. Be friendly, accurate, and professional."
+        "1. Answer concisely using WhatsApp Markdown (*bold* with single asterisks, NEVER double asterisks **).\n"
+        "2. List ALL parts present in the Catalog Context that match the customer's request. Do not arbitrarily skip parts.\n"
+        "3. For each part, include: Part Number, Pack Size, MRP in ₹, Loyalty/Nishtha Points, Application, and Compatible Models.\n"
+        "4. DO NOT output markdown image tags like ![img](url).\n"
+        "5. Be direct, accurate, and professional."
     )
 
     res = client.chat.completions.create(
@@ -148,7 +205,7 @@ def get_bot_reply(user_query: str):
             {"role": "user", "content": f"Catalog Context:\n{context}\n\nCustomer Inquiry: {user_query}"}
         ],
         temperature=0.1,
-        max_tokens=800
+        max_tokens=1500
     )
     
     reply_text = res.choices[0].message.content
@@ -165,7 +222,7 @@ def send_meta_whatsapp_message(to_number: str, text: str, image_urls: list):
         "Content-Type": "application/json"
     }
 
-    # Send the catalog text summary
+    # Step A: Send Text Response
     text_payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
@@ -174,9 +231,9 @@ def send_meta_whatsapp_message(to_number: str, text: str, image_urls: list):
         "text": {"preview_url": True, "body": text}
     }
     r_text = requests.post(url, headers=headers, json=text_payload)
-    print(f"Text Status: {r_text.status_code}")
+    print(f"Text Response Status: {r_text.status_code}")
 
-    # Send at most one distinct preview image
+    # Step B: Send at most one distinct preview image
     if image_urls:
         first_img = image_urls[0]
         if str(first_img).startswith("http"):
@@ -188,7 +245,7 @@ def send_meta_whatsapp_message(to_number: str, text: str, image_urls: list):
                 "image": {"link": first_img}
             }
             r_img = requests.post(url, headers=headers, json=img_payload)
-            print(f"Image Status: {r_img.status_code}")
+            print(f"Image Response Status: {r_img.status_code}")
 
 # =========================================================
 # 5. Webhook Endpoints
@@ -225,7 +282,7 @@ async def handle_meta_message(request: Request):
 
             if msg_type == "text":
                 user_text = msg.get("text", {}).get("body", "")
-                print(f"Received from {from_number}: {user_text}")
+                print(f"Received query from {from_number}: {user_text}")
 
                 bot_reply, images = get_bot_reply(user_text)
                 send_meta_whatsapp_message(from_number, bot_reply, images)
