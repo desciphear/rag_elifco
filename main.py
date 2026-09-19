@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 # =========================================================
 # Configuration
 # =========================================================
-DEFAULT_FILES = ["Data for AI Agent  19-09-2026.xls", "Elofic AI Agent Data.xlsx"]
+DEFAULT_FILES = ["Data for AI Agent  19-09-2026.xls"]
 EXCEL_FILE_PATH = next((f for f in DEFAULT_FILES if os.path.exists(f)), "Data for AI Agent  19-09-2026.xls")
 COLLECTION_NAME = "elofic_catalog"
 DB_PERSIST_PATH = "./elofic_vectordb"
