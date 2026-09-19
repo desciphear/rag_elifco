@@ -39,24 +39,24 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
         df = df.dropna(how="all")
         df.columns = [str(col).strip() for col in df.columns]
 
+        # Standardize column naming variations across exports
         if 'OEM Number' in df.columns and 'OEM' not in df.columns:
             df['OEM'] = df['OEM Number']
+        elif 'OEM' in df.columns and 'OEM Number' not in df.columns:
+            df['OEM Number'] = df['OEM']
+
         if 'IMAGE LINK' in df.columns and 'Image Link' not in df.columns:
             df['Image Link'] = df['IMAGE LINK']
+        elif 'Image Link' in df.columns and 'IMAGE LINK' not in df.columns:
+            df['IMAGE LINK'] = df['Image Link']
+
         if 'Nishtha Points' not in df.columns:
             df['Nishtha Points'] = "N/A"
         if 'PACK SIZE' not in df.columns:
             df['PACK SIZE'] = "N/A"
 
-        merged_columns = [
-            'PART NO', 'MAKER', 'SEGMENT', 'APPLICATION',
-            'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'Nishtha Points',
-            'OEM', 'PUROLATOR', 'MAHLE', 'SOFIMA', 'BOSCH', 'Image Link'
-        ]
-
-        available = [c for c in merged_columns if c in df.columns]
-        df[available] = df[available].ffill()
-        df = df.fillna("N/A")
+        # Forward fill all non-empty columns to handle merged cells
+        df = df.ffill().fillna("N/A")
         frames.append(df)
 
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -64,7 +64,7 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
 df_catalog = load_and_clean_dataframe(EXCEL_FILE_PATH)
 
 # =========================================================
-# 2. Context Retrieval & Structured Item Extraction
+# 2. Universal Search Across All Columns
 # =========================================================
 def extract_numeric_filters(query_lower: str):
     pack_op, pack_val = None, None
@@ -95,14 +95,15 @@ def extract_numeric_filters(query_lower: str):
 
 
 def get_matching_catalog_items(query: str):
-    """Returns structured list of matching parts with details and their individual images."""
     if df_catalog.empty:
         return []
 
-    q_lower = query.lower()
+    q_lower = query.lower().strip()
     (pack_op, pack_val), (pts_op, pts_val) = extract_numeric_filters(q_lower)
 
     df_filtered = df_catalog.copy()
+
+    # Numerical Filter on Pack Size
     if pack_op and pack_val is not None:
         numeric_pack = pd.to_numeric(df_filtered['PACK SIZE'], errors='coerce').fillna(0)
         if pack_op == '>':
@@ -112,6 +113,7 @@ def get_matching_catalog_items(query: str):
         elif pack_op == '==':
             df_filtered = df_filtered[numeric_pack == pack_val]
 
+    # Numerical Filter on Nishtha Points
     if pts_op and pts_val is not None:
         numeric_pts = pd.to_numeric(df_filtered['Nishtha Points'], errors='coerce').fillna(0)
         if pts_op == '>':
@@ -121,6 +123,7 @@ def get_matching_catalog_items(query: str):
         elif pts_op == '==':
             df_filtered = df_filtered[numeric_pts == pts_val]
 
+    # Clean query tokens
     stop_words = {
         'get', 'all', 'where', 'for', 'the', 'in', 'of', 'and', 'filter', 'filters', 'parts', 
         'show', 'give', 'me', 'price', 'pack', 'size', 'points', 'nishtha',
@@ -129,10 +132,14 @@ def get_matching_catalog_items(query: str):
     }
     tokens = [t.strip() for t in q_lower.split() if t not in stop_words and not t.isdigit()]
 
+    # Make ALL columns searchable (excluding URL links)
+    excluded_cols = {'Image Link', 'IMAGE LINK'}
+    search_cols = [c for c in df_filtered.columns if c not in excluded_cols]
+    
+    combined_series = df_filtered[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
+    
+    mask = pd.Series(True, index=df_filtered.index)
     if tokens:
-        search_cols = [c for c in ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'OEM', 'PUROLATOR', 'MAHLE', 'BOSCH'] if c in df_filtered.columns]
-        combined_series = df_filtered[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
-        mask = pd.Series(True, index=df_filtered.index)
         for t in tokens:
             mask = mask & combined_series.str.contains(t, na=False, regex=False)
         df_filtered = df_filtered[mask]
@@ -140,7 +147,7 @@ def get_matching_catalog_items(query: str):
     if df_filtered.empty:
         return []
 
-    # Group by PART NO
+    # Group by PART NO to aggregate compatibility and clean specs
     grouped = df_filtered.groupby('PART NO').agg({
         'APPLICATION': 'first',
         'TYPE': 'first',
@@ -160,9 +167,14 @@ def get_matching_catalog_items(query: str):
         models_display = row['MODEL'] if row['MODEL'] else 'Universal / Standard'
         pack_sz = str(row.get('PACK SIZE', 'N/A')).replace('.0', '')
         nishtha_pts = str(row.get('Nishtha Points', 'N/A')).replace('.0', '')
+        oem_val = str(row.get('OEM', 'N/A')).strip()
+        if oem_val in ['nan', 'None', '', 'N/A']:
+            oem_val = "Not Specified"
 
+        # Explicitly displays OEM Number on WhatsApp
         caption = (
             f"🔧 *Part No:* {row['PART NO']}\n"
+            f"🏷️ *OEM:* {oem_val}\n"
             f"📦 *Pack Size:* {pack_sz} | *MRP:* ₹{row['MRP']}\n"
             f"⭐ *Nishtha Points:* {nishtha_pts}\n"
             f"⚙️ *App:* {row['APPLICATION']}\n"
@@ -226,7 +238,6 @@ def dispatch_catalog_results(to_number: str, user_query: str):
     display_limit = 5
     items_to_send = items[:display_limit]
 
-    # Header / Intro notification
     if total_found > display_limit:
         intro_text = (
             f"🔍 Found *{total_found}* matching parts in the catalog.\n"
@@ -237,7 +248,6 @@ def dispatch_catalog_results(to_number: str, user_query: str):
 
     send_whatsapp_text(to_number, intro_text)
 
-    # Send each part attached to its image
     for item in items_to_send:
         time.sleep(0.3)
         if item["image_url"]:
@@ -245,14 +255,13 @@ def dispatch_catalog_results(to_number: str, user_query: str):
         else:
             send_whatsapp_text(to_number, item["caption"])
 
-    # Notify about remaining parts
     if total_found > display_limit:
         remaining_count = total_found - display_limit
         time.sleep(0.3)
         followup_text = (
             f"📦 *+{remaining_count} more parts are available in our catalog!*\n\n"
             f"💡 To see the remaining parts or narrow down your search, please specify a vehicle model "
-            f"(e.g., *'Swift'*, *'Alto'*), part application (e.g., *'Oil Filter'*, *'Air Filter'*), or pack size."
+            f"(e.g., *'Alto K10'*, *'Swift'*), part application (e.g., *'Oil Filter'*, *'Air Filter'*), or OEM number."
         )
         send_whatsapp_text(to_number, followup_text)
 
