@@ -232,7 +232,7 @@ def get_comprehensive_context(query: str) -> str:
             pts = str(row.get('Nishtha Points', 'N/A')).replace('.0', '')
 
             items.append(
-                f"- **Part No:** {row['PART NO']} | **Pack Size:** {pack_sz} | **MRP:** ₹{row['MRP']} | "
+                f"- **Part No:** **{row['PART NO']}** | **Pack Size:** {pack_sz} | **MRP:** ₹{row['MRP']} | "
                 f"**Nishtha Points:** {pts} | **App:** {row['APPLICATION']} | "
                 f"**Models:** {models_display}{img_str}"
             )
