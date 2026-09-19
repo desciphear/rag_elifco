@@ -232,7 +232,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = [
         {
             "role": "assistant",
-            "content": "Hi there! I'm your Elofic parts advisor. Ask me anything about parts, prices, or vehicle compatibility (e.g., *'Show all oil filters'*, *'Cabin filter for Swift'*, or *'Price for Alto 800 air filter'*)."
+            "content": "Hi there! I'm your Elofic Parts Advisor. We have filters for 2W, 3W, Cars, LCV-HCV, Tractors & Earthmovers. Ask me anything about our filters, prices, or compatibility."
         }
     ]
 

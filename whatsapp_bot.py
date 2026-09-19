@@ -1,8 +1,9 @@
 import os
+import re
 import traceback
 import requests
 import pandas as pd
-from fastapi import FastAPI, Request, Response, status
+from fastapi import FastAPI, Request, Response
 from openai import OpenAI
 
 app = FastAPI()
@@ -21,63 +22,100 @@ client = OpenAI(
     api_key=OPENROUTER_API_KEY
 )
 
-# Load catalog
-def load_catalog():
-    if not os.path.exists(EXCEL_FILE_PATH):
-        print(f"Catalog file {EXCEL_FILE_PATH} not found!")
+# =========================================================
+# 1. Parsing & Indexing Logic (from main.py)
+# =========================================================
+def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
+    """Loads all sheets, forward-fills merged cells, and cleans DataFrame."""
+    if not os.path.exists(file_path):
+        print(f"Catalog file '{file_path}' not found.")
         return pd.DataFrame()
-    excel_data = pd.read_excel(EXCEL_FILE_PATH, sheet_name=None)
+
+    excel_data = pd.read_excel(file_path, sheet_name=None)
     frames = []
+
+    merged_columns = [
+        'PART NO', 'MAKER', 'SEGMENT', 'APPLICATION',
+        'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'OEM', 'PUROLATOR', 'Image Link'
+    ]
+
     for _, df in excel_data.items():
         df = df.dropna(how="all")
-        df.columns = [str(c).strip() for c in df.columns]
-        df = df.ffill().fillna("N/A")
+        df.columns = [str(col).strip() for col in df.columns]
+
+        available = [c for c in merged_columns if c in df.columns]
+        df[available] = df[available].ffill()
+        df = df.fillna("N/A")
         frames.append(df)
+
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-df_catalog = load_catalog()
+df_catalog = load_and_clean_dataframe(EXCEL_FILE_PATH)
 
 # =========================================================
-# Fast Catalog Retriever & LLM
+# 2. Comprehensive Context Retriever (from main.py)
 # =========================================================
-def search_catalog_fast(query: str):
-    q = query.lower().strip()
+def get_comprehensive_context(query: str):
+    if df_catalog.empty:
+        return "Catalog data unavailable.", []
+
+    q_lower = query.lower()
+    stop_words = {'for', 'the', 'in', 'of', 'and', 'filter', 'filters', 'parts', 'show', 'give', 'me', 'price'}
+    tokens = [t.strip() for t in q_lower.split() if t not in stop_words] or q_lower.split()
+
     search_cols = [c for c in ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'OEM'] if c in df_catalog.columns]
-    combined = df_catalog[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
-
-    stop_words = {'for', 'the', 'in', 'of', 'and', 'a', 'is', 'price', 'mrp', 'cost', 'give', 'me', 'show', 'parts', 'filter', 'filters'}
-    tokens = [t for t in q.split() if t not in stop_words] or q.split()
-
+    combined_series = df_catalog[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
+    
     mask = pd.Series(True, index=df_catalog.index)
     for t in tokens:
-        mask = mask & combined.str.contains(t, na=False, regex=False)
+        mask = mask & combined_series.str.contains(t, na=False, regex=False)
 
-    results = df_catalog[mask]
-    if results.empty:
-        results = df_catalog.head(5)
+    df_matched = df_catalog[mask]
+    if df_matched.empty:
+        df_matched = df_catalog.head(6)
 
-    image_urls, items = [], []
-    for _, row in results.head(5).iterrows():
-        img = str(row.get('Image Link', '')).strip()
-        if img.startswith('http') and img not in image_urls:
-            image_urls.append(img)
-        
+    # Group by PART NO to prevent duplicate images and duplicate parts (like in main.py)
+    grouped = df_matched.groupby('PART NO').agg({
+        'APPLICATION': 'first',
+        'TYPE': 'first',
+        'MRP': 'first',
+        'MODEL': lambda x: ', '.join(x.unique()),
+        'OEM': 'first',
+        'Image Link': 'first'
+    }).reset_index()
+
+    items = []
+    unique_images = []
+    for _, row in grouped.iterrows():
+        img_val = str(row.get('Image Link', '')).strip()
+        has_image = img_val.startswith("http")
+        if has_image and img_val not in unique_images:
+            unique_images.append(img_val)
+
+        img_str = f" | Image: {img_val}" if has_image else " | Image: N/A"
         items.append(
-            f"- *Part No:* {row.get('PART NO', 'N/A')} | "
-            f"*Model:* {row.get('MODEL', 'N/A')} | "
-            f"*App:* {row.get('APPLICATION', 'N/A')} | "
-            f"*MRP:* ₹{row.get('MRP', 'N/A')}"
+            f"- *Part No:* {row['PART NO']} | *OEM:* {row['OEM']} | *App:* {row['APPLICATION']} | "
+            f"*MRP:* ₹{row['MRP']} | *Models:* {row['MODEL']}{img_str}"
         )
 
-    return "\n".join(items), image_urls
+    context_str = f"Found {len(grouped)} distinct Part Numbers:\n" + "\n".join(items)
+    return context_str, unique_images
 
+# =========================================================
+# 3. Conversational Generator (WhatsApp-tailored)
+# =========================================================
 def get_bot_reply(user_query: str):
-    context, image_urls = search_catalog_fast(user_query)
+    context, image_urls = get_comprehensive_context(user_query)
+
     system_instruction = (
-        "You are an expert Elofic Auto Parts advisor on WhatsApp. "
-        "Answer concisely with WhatsApp styling (*bold* with single asterisks). "
-        "List Part Number, Compatible Models, Application, and MRP in ₹."
+        "You are an expert Elofic Auto Parts advisor on WhatsApp.\n\n"
+        "FORMATTING RULES:\n"
+        "1. Answer concisely using WhatsApp Markdown (*bold* with single asterisks, no double asterisks **).\n"
+        "2. For each distinct part, clearly list: Part Number, Compatible Models, Application, OEM, and MRP in ₹.\n"
+        "3. DO NOT output markdown image tags like ![img](url). Just present clean text information.\n"
+        "4. Be friendly, accurate, and professional."
     )
+
     res = client.chat.completions.create(
         model="google/gemini-2.5-flash",
         messages=[
@@ -85,46 +123,57 @@ def get_bot_reply(user_query: str):
             {"role": "user", "content": f"Catalog Context:\n{context}\n\nCustomer Inquiry: {user_query}"}
         ],
         temperature=0.1,
-        max_tokens=400
+        max_tokens=800
     )
-    return res.choices[0].message.content, image_urls
+    
+    reply_text = res.choices[0].message.content
+    # Convert any markdown double-asterisks to single asterisks for proper WhatsApp bolding
+    reply_text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', reply_text)
+    return reply_text, image_urls
 
 # =========================================================
-# Send Message via Meta Graph API with Logging
+# 4. WhatsApp Cloud API Dispatcher
 # =========================================================
-def send_meta_whatsapp_message(to_number: str, text: str, image_url: str = None):
+def send_meta_whatsapp_message(to_number: str, text: str, image_urls: list):
     url = f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {META_ACCESS_TOKEN}",
         "Content-Type": "application/json"
     }
 
-    # Step A: Send Text Message First
+    # Step A: Send the detailed text summary
     text_payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
         "to": to_number,
         "type": "text",
-        "text": {"preview_url": False, "body": text}
+        "text": {"preview_url": True, "body": text}
     }
     r_text = requests.post(url, headers=headers, json=text_payload)
-    print(f"Text Response Status: {r_text.status_code}, Body: {r_text.text}")
+    print(f"Text Status: {r_text.status_code}")
 
-    # Step B: Send Image as a Separate Message if Available
-    if image_url and str(image_url).startswith("http"):
-        img_payload = {
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": to_number,
-            "type": "image",
-            "image": {"link": image_url.strip()}
-        }
-        r_img = requests.post(url, headers=headers, json=img_payload)
-        print(f"Image Response Status: {r_img.status_code}, Body: {r_img.text}")
+    # Step B: Send at most ONE preview image to prevent spamming
+    if image_urls:
+        first_img = image_urls[0]
+        if str(first_img).startswith("http"):
+            img_payload = {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to_number,
+                "type": "image",
+                "image": {"link": first_img}
+            }
+            r_img = requests.post(url, headers=headers, json=img_payload)
+            print(f"Image Status: {r_img.status_code}")
 
 # =========================================================
-# Webhook Endpoints
+# 5. Webhook Endpoints
 # =========================================================
+@app.get("/")
+@app.get("/health")
+async def health_check():
+    return {"status": "alive", "service": "elofic-whatsapp-bot"}
+
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     params = request.query_params
@@ -141,23 +190,22 @@ async def handle_meta_message(request: Request):
         changes = entry.get("changes", [])[0]
         value = changes.get("value", {})
 
-        # Ignore delivery/read status updates
+        # Ignore delivery and read notifications
         if "statuses" in value and "messages" not in value:
             return Response(content="OK", status_code=200)
 
         messages = value.get("messages", [])
         if messages:
             msg = messages[0]
-            from_number = msg.get("from")  # e.g., '919350918796'
+            from_number = msg.get("from")
             msg_type = msg.get("type")
 
             if msg_type == "text":
                 user_text = msg.get("text", {}).get("body", "")
-                print(f"Received query from {from_number}: {user_text}")
+                print(f"Received from {from_number}: {user_text}")
 
                 bot_reply, images = get_bot_reply(user_text)
-                first_img = images[0] if images else None
-                send_meta_whatsapp_message(from_number, bot_reply, first_img)
+                send_meta_whatsapp_message(from_number, bot_reply, images)
 
     except Exception as e:
         print(f"Error processing webhook: {e}")
