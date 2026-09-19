@@ -1,4 +1,5 @@
 import os
+import re
 import chromadb
 import pandas as pd
 import streamlit as st
@@ -11,7 +12,9 @@ from typing import Any, Dict, List
 # =========================================================
 DEFAULT_FILES = ["Data for AI Agent  19-09-2026.xls"]
 EXCEL_FILE_PATH = next((f for f in DEFAULT_FILES if os.path.exists(f)), "Data for AI Agent  19-09-2026.xls")
-COLLECTION_NAME = "elofic_catalog"
+
+# Versioned collection name forces a clean ChromaDB index build with Pack Size & Nishtha Points
+COLLECTION_NAME = "elofic_catalog_v2"
 DB_PERSIST_PATH = "./elofic_vectordb"
 OPENROUTER_MODEL = "google/gemini-2.5-flash"
 
@@ -38,11 +41,13 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
             df['Image Link'] = df['IMAGE LINK']
         if 'Nishtha Points' not in df.columns:
             df['Nishtha Points'] = "N/A"
+        if 'PACK SIZE' not in df.columns:
+            df['PACK SIZE'] = "N/A"
 
         merged_columns = [
             'PART NO', 'MAKER', 'SEGMENT', 'APPLICATION',
             'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'Nishtha Points',
-            'OEM', 'PUROLATOR', 'MAHLE', 'BOSCH', 'Image Link'
+            'OEM', 'PUROLATOR', 'MAHLE', 'SOFIMA', 'BOSCH', 'Image Link'
         ]
 
         available = [c for c in merged_columns if c in df.columns]
@@ -53,7 +58,7 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 def build_documents_from_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Converts rows to rich descriptive text passages for semantic search."""
+    """Converts rows to descriptive text passages for semantic search including Pack Size and Nishtha Points."""
     documents = []
     for idx, row in df.iterrows():
         part_no = row.get('PART NO', 'N/A')
@@ -71,7 +76,7 @@ def build_documents_from_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
         passage = (
             f"Elofic Part: {part_no} | Maker: {maker} | Model: {model} | "
             f"Application: {app} | Type: {part_type} | MRP: ₹{mrp} | "
-            f"Pack Size: {pack_size} | Nishtha Points: {nishtha_pts} | "
+            f"Pack Size: {pack_size} | Nishtha Loyalty Points: {nishtha_pts} | "
             f"OEM: {oem} | Purolator: {purolator} | Image: {image_link}"
         )
 
@@ -94,7 +99,7 @@ def build_documents_from_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
 
 @st.cache_resource(show_spinner=False)
 def initialize_database():
-    """Initializes ChromaDB vector store."""
+    """Initializes ChromaDB vector store with the versioned collection."""
     embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name="all-MiniLM-L6-v2"
     )
@@ -145,9 +150,18 @@ client = OpenAI(
 def get_comprehensive_context(query: str) -> str:
     q_lower = query.lower()
 
-    tokens = [t.strip() for t in q_lower.split() if t not in ['for', 'the', 'in', 'of', 'and', 'filter', 'filters', 'parts', 'show', 'give', 'me', 'price']]
-    if not tokens:
-        tokens = q_lower.split()
+    stop_words = {
+        'for', 'the', 'in', 'of', 'and', 'filter', 'filters', 'parts', 
+        'show', 'give', 'me', 'price', 'pack', 'size', 'points', 'nishtha',
+        'greater', 'than', 'more', 'less', 'above', 'below', 'with', 'having',
+        'is', 'are', 'what', 'which', 'can', 'you', 'find'
+    }
+    tokens = [t.strip() for t in q_lower.split() if t not in stop_words]
+
+    pack_size_filter = None
+    pack_match = re.search(r'(?:pack\s*size|pack)\s*(?:>|>=|greater than|more than|above)\s*(\d+)', q_lower)
+    if pack_match:
+        pack_size_filter = int(pack_match.group(1))
 
     search_cols = [
         c for c in [
@@ -158,10 +172,15 @@ def get_comprehensive_context(query: str) -> str:
     combined_series = df_catalog[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
     
     mask = pd.Series(True, index=df_catalog.index)
-    for t in tokens:
-        mask = mask & combined_series.str.contains(t, na=False, regex=False)
+    if tokens:
+        for t in tokens:
+            mask = mask & combined_series.str.contains(t, na=False, regex=False)
 
     df_matched = df_catalog[mask]
+
+    if pack_size_filter is not None:
+        numeric_pack = pd.to_numeric(df_catalog['PACK SIZE'], errors='coerce').fillna(0)
+        df_matched = df_catalog[numeric_pack > pack_size_filter]
 
     if not df_matched.empty:
         grouped = df_matched.groupby('PART NO').agg({
@@ -176,7 +195,7 @@ def get_comprehensive_context(query: str) -> str:
         }).reset_index()
 
         items = []
-        for _, row in grouped.iterrows():
+        for _, row in grouped.head(10).iterrows():
             img_val = str(row.get('Image Link', '')).strip()
             img_str = f" | Image: {img_val}" if img_val.startswith("http") else " | Image: N/A"
             models_display = row['MODEL'] if row['MODEL'] else 'Universal / Standard'
@@ -203,12 +222,12 @@ def stream_conversational_rag(user_query: str):
     system_instruction = (
         "You are an expert, helpful Elofic Auto Parts advisor.\n\n"
         "CRITICAL RULES:\n"
-        "1. DO NOT truncate or omit any matching parts from the context.\n"
-        "2. MANDATORY IMAGE RENDERING: For EVERY part that has an Image URL (starting with http), you MUST render it inline immediately below the part details using Markdown format: ![Part Preview](URL). Never output plain text URLs or skip the image.\n"
-        "3. DO NOT use Markdown tables. Use bullet points with bold highlights.\n"
+        "1. DO NOT truncate or omit matching parts from the context.\n"
+        "2. MANDATORY IMAGE RENDERING: For EVERY part that has an Image URL (starting with http), you MUST render it inline immediately below the part details using Markdown format: ![Part Preview](URL).\n"
+        "3. DO NOT use Markdown tables. Use clean bullet points with bold highlights.\n"
         "4. For each part, include: Part Number, Applicable Models, Application, OEM, MRP in ₹, Pack Size, Nishtha Points, and the rendered image.\n"
         "5. If a part has no valid image link (or is 'N/A'), omit the image markdown for that part.\n"
-        "6. Be concise, friendly, and helpful."
+        "6. If the user asks to filter or compare (e.g. 'pack size greater than 50'), evaluate the parts in the context and present only the matching ones."
     )
 
     prompt_content = f"Catalog Context:\n{context}\n\nCustomer Inquiry: {user_query}"
@@ -247,7 +266,7 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if user_prompt := st.chat_input("Ask a question (e.g., 'oil filters', 'cabin filter for swfit', 'part no for ciaz')..."):
+if user_prompt := st.chat_input("Ask a question (e.g., 'parts with pack size greater than 50', 'oil filter for swift')..."):
     st.session_state.messages.append({"role": "user", "content": user_prompt})
     with st.chat_message("user"):
         st.markdown(user_prompt)
