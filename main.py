@@ -259,7 +259,7 @@ def stream_conversational_rag(user_query: str):
             {"role": "user", "content": prompt_content},
         ],
         temperature=0.1,
-        max_tokens=2500,
+        max_tokens=2000,
         stream=True,
     )
 
