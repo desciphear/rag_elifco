@@ -9,7 +9,8 @@ from typing import Any, Dict, List
 # =========================================================
 # Configuration
 # =========================================================
-EXCEL_FILE_PATH = "Elofic AI Agent Data.xlsx"
+DEFAULT_FILES = ["Data for AI Agent  19-09-2026.xls", "Elofic AI Agent Data.xlsx"]
+EXCEL_FILE_PATH = next((f for f in DEFAULT_FILES if os.path.exists(f)), "Data for AI Agent  19-09-2026.xls")
 COLLECTION_NAME = "elofic_catalog"
 DB_PERSIST_PATH = "./elofic_vectordb"
 OPENROUTER_MODEL = "google/gemini-2.5-flash"
@@ -19,7 +20,7 @@ OPENROUTER_MODEL = "google/gemini-2.5-flash"
 # =========================================================
 @st.cache_data
 def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
-    """Loads all sheets, forward-fills merged cells, and cleans the DataFrame."""
+    """Loads all sheets, normalizes columns, forward-fills merged cells, and cleans DataFrame."""
     if not os.path.exists(file_path):
         st.error(f"Catalog file '{file_path}' not found.")
         st.stop()
@@ -27,14 +28,21 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
     excel_data = pd.read_excel(file_path, sheet_name=None)
     frames = []
 
-    merged_columns = [
-        'PART NO', 'MAKER', 'SEGMENT', 'APPLICATION',
-        'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'OEM','PUROLATOR', 'Image Link'
-    ]
-
-    for sheet_name, df in excel_data.items():
+    for _, df in excel_data.items():
         df = df.dropna(how="all")
         df.columns = [str(col).strip() for col in df.columns]
+
+        # Standardize column names between old and new format
+        if 'OEM Number' in df.columns and 'OEM' not in df.columns:
+            df['OEM'] = df['OEM Number']
+        if 'IMAGE LINK' in df.columns and 'Image Link' not in df.columns:
+            df['Image Link'] = df['IMAGE LINK']
+
+        merged_columns = [
+            'PART NO', 'MAKER', 'SEGMENT', 'APPLICATION',
+            'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'OEM', 
+            'PUROLATOR', 'MAHLE', 'BOSCH', 'Image Link'
+        ]
 
         available = [c for c in merged_columns if c in df.columns]
         df[available] = df[available].ffill()
@@ -42,7 +50,6 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
         frames.append(df)
 
     return pd.concat(frames, ignore_index=True)
-
 
 def build_documents_from_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
     """Converts rows to rich descriptive text passages for semantic search."""
@@ -79,7 +86,6 @@ def build_documents_from_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
         })
     return documents
 
-
 @st.cache_resource(show_spinner=False)
 def initialize_database():
     """Initializes ChromaDB vector store."""
@@ -112,8 +118,7 @@ def initialize_database():
 
     return collection
 
-
-# Load clean catalog and vector store
+# Load catalog and vector store
 df_catalog = load_and_clean_dataframe(EXCEL_FILE_PATH)
 collection = initialize_database()
 
@@ -134,15 +139,11 @@ client = OpenAI(
 def get_comprehensive_context(query: str) -> str:
     q_lower = query.lower()
 
-    # Match ANY keyword against Part No, Maker, Model, Application, or Type
-    # This ensures "esteem filter", "swift oil", etc. all get complete structured data with image links
     tokens = [t.strip() for t in q_lower.split() if t not in ['for', 'the', 'in', 'of', 'and', 'filter', 'filters', 'parts', 'show', 'give', 'me', 'price']]
-    
     if not tokens:
         tokens = q_lower.split()
 
-    # Search in DataFrame
-    search_cols = ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE','OEM']
+    search_cols = [c for c in ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'OEM', 'PUROLATOR', 'MAHLE', 'BOSCH'] if c in df_catalog.columns]
     combined_series = df_catalog[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
     
     mask = pd.Series(True, index=df_catalog.index)
@@ -156,7 +157,7 @@ def get_comprehensive_context(query: str) -> str:
             'APPLICATION': 'first',
             'TYPE': 'first',
             'MRP': 'first',
-            'MODEL': lambda x: ', '.join(x.unique()),
+            'MODEL': lambda x: ', '.join(dict.fromkeys(str(v) for v in x if str(v) != 'N/A')),
             'OEM': 'first',
             'Image Link': 'first'
         }).reset_index()
@@ -165,42 +166,32 @@ def get_comprehensive_context(query: str) -> str:
         for _, row in grouped.iterrows():
             img_val = str(row.get('Image Link', '')).strip()
             img_str = f" | Image: {img_val}" if img_val.startswith("http") else " | Image: N/A"
+            models_display = row['MODEL'] if row['MODEL'] else 'Universal / Standard'
             items.append(
-                f"- **Part No:** {row['PART NO']} | **OEM** {row['OEM']} | **App:** {row['APPLICATION']} | "
-                f"**MRP:** ₹{row['MRP']} | **Models:** {row['MODEL']}{img_str}"
+                f"- **Part No:** {row['PART NO']} | **OEM:** {row['OEM']} | **App:** {row['APPLICATION']} | "
+                f"**MRP:** ₹{row['MRP']} | **Models:** {models_display}{img_str}"
             )
         return f"Found {len(grouped)} distinct Part Numbers:\n" + "\n".join(items)
 
-    # Fallback to vector search if no direct keyword match
     search_results = collection.query(query_texts=[query], n_results=8)
     retrieved_docs = search_results.get("documents", [[]])[0]
     return "\n".join(f"- {doc}" for doc in retrieved_docs) if retrieved_docs else "No matching catalog records found."
-
-    # Fallback to Semantic Vector Search for targeted queries
-    search_results = collection.query(
-        query_texts=[query],
-        n_results=10
-    )
-    retrieved_docs = search_results.get("documents", [[]])[0]
-    return "\n".join(f"- {doc}" for doc in retrieved_docs) if retrieved_docs else "No matching catalog records found."
-
 
 # =========================================================
 # 3. Streaming Conversational Generator
 # =========================================================
 def stream_conversational_rag(user_query: str):
-    """Retrieves full context and streams human-like response."""
     context = get_comprehensive_context(user_query)
 
     system_instruction = (
-    "You are an expert, helpful Elofic Auto Parts advisor.\n\n"
-    "CRITICAL RULES:\n"
-    "1. DO NOT truncate or omit any matching parts from the context.\n"
-    "2. MANDATORY IMAGE RENDERING: For EVERY part that has an Image URL (starting with http), you MUST render it inline immediately below the part details using Markdown format: ![Part Preview](URL). Never output plain text URLs or skip the image.\n"
-    "3. DO NOT use Markdown tables. Use bullet points with bold highlights.\n"
-    "4. For each part, include: Part Number, Applicable Models, Application, OEM ,MRP in ₹, and the rendered image.\n"
-    "5. If a part has no valid image link (or is 'N/A'), omit the image markdown for that part.\n"
-    "6. Be concise, friendly, and helpful."
+        "You are an expert, helpful Elofic Auto Parts advisor.\n\n"
+        "CRITICAL RULES:\n"
+        "1. DO NOT truncate or omit any matching parts from the context.\n"
+        "2. MANDATORY IMAGE RENDERING: For EVERY part that has an Image URL (starting with http), you MUST render it inline immediately below the part details using Markdown format: ![Part Preview](URL). Never output plain text URLs or skip the image.\n"
+        "3. DO NOT use Markdown tables. Use bullet points with bold highlights.\n"
+        "4. For each part, include: Part Number, Applicable Models, Application, OEM, MRP in ₹, and the rendered image.\n"
+        "5. If a part has no valid image link (or is 'N/A'), omit the image markdown for that part.\n"
+        "6. Be concise, friendly, and helpful."
     )
 
     prompt_content = f"Catalog Context:\n{context}\n\nCustomer Inquiry: {user_query}"
@@ -220,7 +211,6 @@ def stream_conversational_rag(user_query: str):
         if chunk.choices and chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
 
-
 # =========================================================
 # 4. Streamlit Chat Interface
 # =========================================================
@@ -236,12 +226,10 @@ if "messages" not in st.session_state:
         }
     ]
 
-# Display conversation history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# User Chat Input
 if user_prompt := st.chat_input("Ask a question (e.g., 'oil filters', 'cabin filter for swfit', 'part no for ciaz')..."):
     st.session_state.messages.append({"role": "user", "content": user_prompt})
     with st.chat_message("user"):
