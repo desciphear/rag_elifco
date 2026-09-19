@@ -11,7 +11,9 @@ app = FastAPI()
 # =========================================================
 # Configuration
 # =========================================================
-EXCEL_FILE_PATH = "Data for AI Agent 19-09-2026.xlsx"
+DEFAULT_FILES = ["Data for AI Agent  19-09-2026.xls"]
+EXCEL_FILE_PATH = next((f for f in DEFAULT_FILES if os.path.exists(f)), "Data for AI Agent  19-09-2026.xls")
+
 META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "1298145263384348")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "elofic_secure_webhook_token_2026")
@@ -23,10 +25,10 @@ client = OpenAI(
 )
 
 # =========================================================
-# 1. Parsing & Indexing Logic (from main.py)
+# 1. Parsing & Indexing Logic
 # =========================================================
 def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
-    """Loads all sheets, forward-fills merged cells, and cleans DataFrame."""
+    """Loads all sheets, normalizes columns, forward-fills merged cells, and cleans DataFrame."""
     if not os.path.exists(file_path):
         print(f"Catalog file '{file_path}' not found.")
         return pd.DataFrame()
@@ -34,14 +36,23 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
     excel_data = pd.read_excel(file_path, sheet_name=None)
     frames = []
 
-    merged_columns = [
-        'PART NO', 'MAKER', 'SEGMENT', 'APPLICATION',
-        'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'OEM', 'PUROLATOR', 'Image Link'
-    ]
-
     for _, df in excel_data.items():
         df = df.dropna(how="all")
         df.columns = [str(col).strip() for col in df.columns]
+
+        # Standardize column naming variations across file versions
+        if 'OEM Number' in df.columns and 'OEM' not in df.columns:
+            df['OEM'] = df['OEM Number']
+        if 'IMAGE LINK' in df.columns and 'Image Link' not in df.columns:
+            df['Image Link'] = df['IMAGE LINK']
+        if 'Nishtha Points' not in df.columns:
+            df['Nishtha Points'] = "N/A"
+
+        merged_columns = [
+            'PART NO', 'MAKER', 'SEGMENT', 'APPLICATION',
+            'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'Nishtha Points',
+            'OEM', 'PUROLATOR', 'MAHLE', 'BOSCH', 'Image Link'
+        ]
 
         available = [c for c in merged_columns if c in df.columns]
         df[available] = df[available].ffill()
@@ -53,7 +64,7 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
 df_catalog = load_and_clean_dataframe(EXCEL_FILE_PATH)
 
 # =========================================================
-# 2. Comprehensive Context Retriever (from main.py)
+# 2. Comprehensive Context Retriever (Search Logic)
 # =========================================================
 def get_comprehensive_context(query: str):
     if df_catalog.empty:
@@ -63,7 +74,12 @@ def get_comprehensive_context(query: str):
     stop_words = {'for', 'the', 'in', 'of', 'and', 'filter', 'filters', 'parts', 'show', 'give', 'me', 'price'}
     tokens = [t.strip() for t in q_lower.split() if t not in stop_words] or q_lower.split()
 
-    search_cols = [c for c in ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'OEM'] if c in df_catalog.columns]
+    search_cols = [
+        c for c in [
+            'PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 
+            'OEM', 'PUROLATOR', 'MAHLE', 'BOSCH', 'PACK SIZE', 'Nishtha Points'
+        ] if c in df_catalog.columns
+    ]
     combined_series = df_catalog[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
     
     mask = pd.Series(True, index=df_catalog.index)
@@ -74,12 +90,14 @@ def get_comprehensive_context(query: str):
     if df_matched.empty:
         df_matched = df_catalog.head(6)
 
-    # Group by PART NO to prevent duplicate images and duplicate parts (like in main.py)
+    # Group by PART NO to prevent duplicate images and duplicate parts
     grouped = df_matched.groupby('PART NO').agg({
         'APPLICATION': 'first',
         'TYPE': 'first',
         'MRP': 'first',
-        'MODEL': lambda x: ', '.join(x.unique()),
+        'PACK SIZE': 'first',
+        'Nishtha Points': 'first',
+        'MODEL': lambda x: ', '.join(dict.fromkeys(str(v) for v in x if str(v) != 'N/A')),
         'OEM': 'first',
         'Image Link': 'first'
     }).reset_index()
@@ -93,9 +111,16 @@ def get_comprehensive_context(query: str):
             unique_images.append(img_val)
 
         img_str = f" | Image: {img_val}" if has_image else " | Image: N/A"
+        models_display = row['MODEL'] if row['MODEL'] else 'Universal / Standard'
+        
+        # Clean formatting for points and pack size
+        nishtha_pts = str(row.get('Nishtha Points', 'N/A')).replace('.0', '')
+        pack_sz = str(row.get('PACK SIZE', 'N/A')).replace('.0', '')
+
         items.append(
             f"- *Part No:* {row['PART NO']} | *OEM:* {row['OEM']} | *App:* {row['APPLICATION']} | "
-            f"*MRP:* ₹{row['MRP']} | *Models:* {row['MODEL']}{img_str}"
+            f"*MRP:* ₹{row['MRP']} | *Pack Size:* {pack_sz} | *Nishtha Points:* {nishtha_pts} | "
+            f"*Models:* {models_display}{img_str}"
         )
 
     context_str = f"Found {len(grouped)} distinct Part Numbers:\n" + "\n".join(items)
@@ -111,7 +136,7 @@ def get_bot_reply(user_query: str):
         "You are an expert Elofic Auto Parts advisor on WhatsApp.\n\n"
         "FORMATTING RULES:\n"
         "1. Answer concisely using WhatsApp Markdown (*bold* with single asterisks, no double asterisks **).\n"
-        "2. For each distinct part, clearly list: Part Number, Compatible Models, Application, OEM, and MRP in ₹.\n"
+        "2. For each distinct part, clearly list: Part Number, Compatible Models, Application, OEM, MRP in ₹, Pack Size, and Nishtha Points.\n"
         "3. DO NOT output markdown image tags like ![img](url). Just present clean text information.\n"
         "4. Be friendly, accurate, and professional."
     )
@@ -127,7 +152,6 @@ def get_bot_reply(user_query: str):
     )
     
     reply_text = res.choices[0].message.content
-    # Convert any markdown double-asterisks to single asterisks for proper WhatsApp bolding
     reply_text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', reply_text)
     return reply_text, image_urls
 
@@ -141,7 +165,7 @@ def send_meta_whatsapp_message(to_number: str, text: str, image_urls: list):
         "Content-Type": "application/json"
     }
 
-    # Step A: Send the detailed text summary
+    # Send the catalog text summary
     text_payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
@@ -152,7 +176,7 @@ def send_meta_whatsapp_message(to_number: str, text: str, image_urls: list):
     r_text = requests.post(url, headers=headers, json=text_payload)
     print(f"Text Status: {r_text.status_code}")
 
-    # Step B: Send at most ONE preview image to prevent spamming
+    # Send at most one distinct preview image
     if image_urls:
         first_img = image_urls[0]
         if str(first_img).startswith("http"):
@@ -190,7 +214,6 @@ async def handle_meta_message(request: Request):
         changes = entry.get("changes", [])[0]
         value = changes.get("value", {})
 
-        # Ignore delivery and read notifications
         if "statuses" in value and "messages" not in value:
             return Response(content="OK", status_code=200)
 
