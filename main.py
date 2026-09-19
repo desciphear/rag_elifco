@@ -13,7 +13,6 @@ from typing import Any, Dict, List
 DEFAULT_FILES = ["Data for AI Agent  19-09-2026.xls"]
 EXCEL_FILE_PATH = next((f for f in DEFAULT_FILES if os.path.exists(f)), "Data for AI Agent  19-09-2026.xls")
 
-# Versioned collection name forces a clean ChromaDB index build with Pack Size & Nishtha Points
 COLLECTION_NAME = "elofic_catalog_v2"
 DB_PERSIST_PATH = "./elofic_vectordb"
 OPENROUTER_MODEL = "google/gemini-2.5-flash"
@@ -58,7 +57,7 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 def build_documents_from_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Converts rows to descriptive text passages for semantic search including Pack Size and Nishtha Points."""
+    """Converts rows to descriptive text passages for semantic search."""
     documents = []
     for idx, row in df.iterrows():
         part_no = row.get('PART NO', 'N/A')
@@ -129,11 +128,9 @@ def initialize_database():
 
     return collection
 
-# Load catalog and vector store
 df_catalog = load_and_clean_dataframe(EXCEL_FILE_PATH)
 collection = initialize_database()
 
-# OpenRouter Client
 api_key = st.secrets.get("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
 if not api_key:
     st.error("Please configure your `OPENROUTER_API_KEY` in Streamlit Secrets or .env file.")
@@ -147,43 +144,75 @@ client = OpenAI(
 # =========================================================
 # 2. Comprehensive Context Retriever
 # =========================================================
+def extract_numeric_filters(query_lower: str):
+    pack_op, pack_val = None, None
+    m_gt = re.search(r'(?:pack\s*size|pack)\s*(?:is\s*)?(?:>|>=|greater than|more than|above|over)\s*(\d+)', query_lower)
+    m_lt = re.search(r'(?:pack\s*size|pack)\s*(?:is\s*)?(?:<|<=|less than|under|below)\s*(\d+)', query_lower)
+    m_eq = re.search(r'(?:pack\s*size|pack)\s*(?:is\s*|equals?\s*|=|:\s*)?(\d+)', query_lower)
+
+    if m_gt:
+        pack_op, pack_val = '>', int(m_gt.group(1))
+    elif m_lt:
+        pack_op, pack_val = '<', int(m_lt.group(1))
+    elif m_eq:
+        pack_op, pack_val = '==', int(m_eq.group(1))
+
+    pts_op, pts_val = None, None
+    p_gt = re.search(r'(?:nishtha\s*points?|points?)\s*(?:is\s*)?(?:>|>=|greater than|more than|above|over)\s*(\d+)', query_lower)
+    p_lt = re.search(r'(?:nishtha\s*points?|points?)\s*(?:is\s*)?(?:<|<=|less than|under|below)\s*(\d+)', query_lower)
+    p_eq = re.search(r'(?:nishtha\s*points?|points?)\s*(?:is\s*|equals?\s*|=|:\s*)?(\d+)', query_lower)
+
+    if p_gt:
+        pts_op, pts_val = '>', int(p_gt.group(1))
+    elif p_lt:
+        pts_op, pts_val = '<', int(p_lt.group(1))
+    elif p_eq:
+        pts_op, pts_val = '==', int(p_eq.group(1))
+
+    return (pack_op, pack_val), (pts_op, pts_val)
+
+
 def get_comprehensive_context(query: str) -> str:
     q_lower = query.lower()
+    (pack_op, pack_val), (pts_op, pts_val) = extract_numeric_filters(q_lower)
+
+    df_filtered = df_catalog.copy()
+    if pack_op and pack_val is not None:
+        numeric_pack = pd.to_numeric(df_filtered['PACK SIZE'], errors='coerce').fillna(0)
+        if pack_op == '>':
+            df_filtered = df_filtered[numeric_pack > pack_val]
+        elif pack_op == '<':
+            df_filtered = df_filtered[numeric_pack < pack_val]
+        elif pack_op == '==':
+            df_filtered = df_filtered[numeric_pack == pack_val]
+
+    if pts_op and pts_val is not None:
+        numeric_pts = pd.to_numeric(df_filtered['Nishtha Points'], errors='coerce').fillna(0)
+        if pts_op == '>':
+            df_filtered = df_filtered[numeric_pts > pts_val]
+        elif pts_op == '<':
+            df_filtered = df_filtered[numeric_pts < pts_val]
+        elif pts_op == '==':
+            df_filtered = df_filtered[numeric_pts == pts_val]
 
     stop_words = {
-        'for', 'the', 'in', 'of', 'and', 'filter', 'filters', 'parts', 
+        'get', 'all', 'where', 'for', 'the', 'in', 'of', 'and', 'filter', 'filters', 'parts', 
         'show', 'give', 'me', 'price', 'pack', 'size', 'points', 'nishtha',
         'greater', 'than', 'more', 'less', 'above', 'below', 'with', 'having',
-        'is', 'are', 'what', 'which', 'can', 'you', 'find'
+        'is', 'are', 'what', 'which', 'can', 'you', 'find', 'item', 'items'
     }
-    tokens = [t.strip() for t in q_lower.split() if t not in stop_words]
+    tokens = [t.strip() for t in q_lower.split() if t not in stop_words and not t.isdigit()]
 
-    pack_size_filter = None
-    pack_match = re.search(r'(?:pack\s*size|pack)\s*(?:>|>=|greater than|more than|above)\s*(\d+)', q_lower)
-    if pack_match:
-        pack_size_filter = int(pack_match.group(1))
-
-    search_cols = [
-        c for c in [
-            'PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 
-            'OEM', 'PUROLATOR', 'MAHLE', 'BOSCH', 'PACK SIZE', 'Nishtha Points'
-        ] if c in df_catalog.columns
-    ]
-    combined_series = df_catalog[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
-    
-    mask = pd.Series(True, index=df_catalog.index)
     if tokens:
+        search_cols = [c for c in ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'OEM', 'PUROLATOR', 'MAHLE', 'BOSCH'] if c in df_filtered.columns]
+        combined_series = df_filtered[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
+        mask = pd.Series(True, index=df_filtered.index)
         for t in tokens:
             mask = mask & combined_series.str.contains(t, na=False, regex=False)
+        df_filtered = df_filtered[mask]
 
-    df_matched = df_catalog[mask]
-
-    if pack_size_filter is not None:
-        numeric_pack = pd.to_numeric(df_catalog['PACK SIZE'], errors='coerce').fillna(0)
-        df_matched = df_catalog[numeric_pack > pack_size_filter]
-
-    if not df_matched.empty:
-        grouped = df_matched.groupby('PART NO').agg({
+    if not df_filtered.empty:
+        grouped = df_filtered.groupby('PART NO').agg({
             'APPLICATION': 'first',
             'TYPE': 'first',
             'MRP': 'first',
@@ -195,7 +224,7 @@ def get_comprehensive_context(query: str) -> str:
         }).reset_index()
 
         items = []
-        for _, row in grouped.head(10).iterrows():
+        for _, row in grouped.head(25).iterrows():
             img_val = str(row.get('Image Link', '')).strip()
             img_str = f" | Image: {img_val}" if img_val.startswith("http") else " | Image: N/A"
             models_display = row['MODEL'] if row['MODEL'] else 'Universal / Standard'
@@ -203,13 +232,13 @@ def get_comprehensive_context(query: str) -> str:
             pts = str(row.get('Nishtha Points', 'N/A')).replace('.0', '')
 
             items.append(
-                f"- **Part No:** {row['PART NO']} | **OEM:** {row['OEM']} | **App:** {row['APPLICATION']} | "
-                f"**MRP:** ₹{row['MRP']} | **Pack Size:** {pack_sz} | **Nishtha Points:** {pts} | "
+                f"- **Part No:** {row['PART NO']} | **Pack Size:** {pack_sz} | **MRP:** ₹{row['MRP']} | "
+                f"**Nishtha Points:** {pts} | **App:** {row['APPLICATION']} | "
                 f"**Models:** {models_display}{img_str}"
             )
-        return f"Found {len(grouped)} distinct Part Numbers:\n" + "\n".join(items)
+        return f"Found {len(grouped)} matching Part Numbers:\n" + "\n".join(items)
 
-    search_results = collection.query(query_texts=[query], n_results=8)
+    search_results = collection.query(query_texts=[query], n_results=10)
     retrieved_docs = search_results.get("documents", [[]])[0]
     return "\n".join(f"- {doc}" for doc in retrieved_docs) if retrieved_docs else "No matching catalog records found."
 
@@ -222,12 +251,12 @@ def stream_conversational_rag(user_query: str):
     system_instruction = (
         "You are an expert, helpful Elofic Auto Parts advisor.\n\n"
         "CRITICAL RULES:\n"
-        "1. DO NOT truncate or omit matching parts from the context.\n"
+        "1. DO NOT truncate or omit matching parts from the context. Present all parts returned in the Catalog Context.\n"
         "2. MANDATORY IMAGE RENDERING: For EVERY part that has an Image URL (starting with http), you MUST render it inline immediately below the part details using Markdown format: ![Part Preview](URL).\n"
         "3. DO NOT use Markdown tables. Use clean bullet points with bold highlights.\n"
-        "4. For each part, include: Part Number, Applicable Models, Application, OEM, MRP in ₹, Pack Size, Nishtha Points, and the rendered image.\n"
+        "4. For each part, include: Part Number, Pack Size, MRP in ₹, Nishtha Points, Application, OEM, Compatible Models, and the rendered image.\n"
         "5. If a part has no valid image link (or is 'N/A'), omit the image markdown for that part.\n"
-        "6. If the user asks to filter or compare (e.g. 'pack size greater than 50'), evaluate the parts in the context and present only the matching ones."
+        "6. Answer accurately based on the catalog context."
     )
 
     prompt_content = f"Catalog Context:\n{context}\n\nCustomer Inquiry: {user_query}"
@@ -239,7 +268,7 @@ def stream_conversational_rag(user_query: str):
             {"role": "user", "content": prompt_content},
         ],
         temperature=0.1,
-        max_tokens=2000,
+        max_tokens=2500,
         stream=True,
     )
 
@@ -266,7 +295,7 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if user_prompt := st.chat_input("Ask a question (e.g., 'parts with pack size greater than 50', 'oil filter for swift')..."):
+if user_prompt := st.chat_input("Ask a question (e.g., 'parts where pack size is 100', 'parts where pack size is greater than 100')..."):
     st.session_state.messages.append({"role": "user", "content": user_prompt})
     with st.chat_message("user"):
         st.markdown(user_prompt)
