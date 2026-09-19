@@ -13,7 +13,7 @@ from typing import Any, Dict, List
 EXCEL_FILE_PATH = "Data for AI Agent  19-09-2026.xls"
 COLLECTION_NAME = "elofic_catalog_v3"
 DB_PERSIST_PATH = "./elofic_vectordb"
-OPENROUTER_MODEL = "google/gemini-2.5-flash"
+OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 # =========================================================
 # 1. Parsing & Indexing Logic
@@ -259,7 +259,7 @@ def stream_conversational_rag(user_query: str):
             {"role": "user", "content": prompt_content},
         ],
         temperature=0.1,
-        max_tokens=1600,
+        max_tokens=2500,
         stream=True,
     )
 
