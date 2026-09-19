@@ -39,7 +39,7 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
         df = df.dropna(how="all")
         df.columns = [str(col).strip() for col in df.columns]
 
-        # Standardize column naming variations across exports
+        # Standardize column naming variations
         if 'OEM Number' in df.columns and 'OEM' not in df.columns:
             df['OEM'] = df['OEM Number']
         elif 'OEM' in df.columns and 'OEM Number' not in df.columns:
@@ -55,7 +55,7 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
         if 'PACK SIZE' not in df.columns:
             df['PACK SIZE'] = "N/A"
 
-        # Forward fill all non-empty columns to handle merged cells
+        # Forward fill to handle merged header cells
         df = df.ffill().fillna("N/A")
         frames.append(df)
 
@@ -123,7 +123,6 @@ def get_matching_catalog_items(query: str):
         elif pts_op == '==':
             df_filtered = df_filtered[numeric_pts == pts_val]
 
-    # Clean query tokens
     stop_words = {
         'get', 'all', 'where', 'for', 'the', 'in', 'of', 'and', 'filter', 'filters', 'parts', 
         'show', 'give', 'me', 'price', 'pack', 'size', 'points', 'nishtha',
@@ -147,7 +146,7 @@ def get_matching_catalog_items(query: str):
     if df_filtered.empty:
         return []
 
-    # Group by PART NO to aggregate compatibility and clean specs
+    # Group by PART NO to remove duplicates
     grouped = df_filtered.groupby('PART NO').agg({
         'APPLICATION': 'first',
         'TYPE': 'first',
@@ -171,7 +170,6 @@ def get_matching_catalog_items(query: str):
         if oem_val in ['nan', 'None', '', 'N/A']:
             oem_val = "Not Specified"
 
-        # Explicitly displays OEM Number on WhatsApp
         caption = (
             f"🔧 *Part No:* {row['PART NO']}\n"
             f"🏷️ *OEM:* {oem_val}\n"
@@ -235,35 +233,20 @@ def dispatch_catalog_results(to_number: str, user_query: str):
         return
 
     total_found = len(items)
-    display_limit = 5
-    items_to_send = items[:display_limit]
 
-    if total_found > display_limit:
-        intro_text = (
-            f"🔍 Found *{total_found}* matching parts in the catalog.\n"
-            f"Showing the top *{display_limit}* results below with images:"
-        )
-    else:
-        intro_text = f"🔍 Found *{total_found}* matching Elofic part(s):"
+    # Inform user about all matching parts found
+    send_whatsapp_text(
+        to_number,
+        f"🔍 Found *{total_found}* matching Elofic part(s). Loading all results below with product images:"
+    )
 
-    send_whatsapp_text(to_number, intro_text)
-
-    for item in items_to_send:
-        time.sleep(0.3)
+    # Sends EVERY matching part with its image and specifications
+    for item in items:
+        time.sleep(0.35)  # Safe spacing to stay well within Meta Cloud API rate limits
         if item["image_url"]:
             send_whatsapp_image_with_details(to_number, item["image_url"], item["caption"])
         else:
             send_whatsapp_text(to_number, item["caption"])
-
-    if total_found > display_limit:
-        remaining_count = total_found - display_limit
-        time.sleep(0.3)
-        followup_text = (
-            f"📦 *+{remaining_count} more parts are available in our catalog!*\n\n"
-            f"💡 To see the remaining parts or narrow down your search, please specify a vehicle model "
-            f"(e.g., *'Alto K10'*, *'Swift'*), part application (e.g., *'Oil Filter'*, *'Air Filter'*), or OEM number."
-        )
-        send_whatsapp_text(to_number, followup_text)
 
 # =========================================================
 # 4. Webhook Endpoints
