@@ -32,16 +32,17 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
         df = df.dropna(how="all")
         df.columns = [str(col).strip() for col in df.columns]
 
-        # Standardize column names between old and new format
         if 'OEM Number' in df.columns and 'OEM' not in df.columns:
             df['OEM'] = df['OEM Number']
         if 'IMAGE LINK' in df.columns and 'Image Link' not in df.columns:
             df['Image Link'] = df['IMAGE LINK']
+        if 'Nishtha Points' not in df.columns:
+            df['Nishtha Points'] = "N/A"
 
         merged_columns = [
             'PART NO', 'MAKER', 'SEGMENT', 'APPLICATION',
-            'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'OEM', 
-            'PUROLATOR', 'MAHLE', 'BOSCH', 'Image Link'
+            'TYPE', 'ENGINE BS', 'PACK SIZE', 'MRP', 'Nishtha Points',
+            'OEM', 'PUROLATOR', 'MAHLE', 'BOSCH', 'Image Link'
         ]
 
         available = [c for c in merged_columns if c in df.columns]
@@ -61,6 +62,8 @@ def build_documents_from_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
         app = row.get('APPLICATION', 'N/A')
         part_type = row.get('TYPE', 'N/A')
         mrp = row.get('MRP', 'N/A')
+        pack_size = str(row.get('PACK SIZE', 'N/A')).replace('.0', '')
+        nishtha_pts = str(row.get('Nishtha Points', 'N/A')).replace('.0', '')
         oem = row.get('OEM', 'N/A')
         purolator = row.get('PUROLATOR', 'N/A')
         image_link = row.get('Image Link', 'N/A')
@@ -68,6 +71,7 @@ def build_documents_from_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
         passage = (
             f"Elofic Part: {part_no} | Maker: {maker} | Model: {model} | "
             f"Application: {app} | Type: {part_type} | MRP: ₹{mrp} | "
+            f"Pack Size: {pack_size} | Nishtha Points: {nishtha_pts} | "
             f"OEM: {oem} | Purolator: {purolator} | Image: {image_link}"
         )
 
@@ -79,6 +83,8 @@ def build_documents_from_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
                 "model": str(model),
                 "application": str(app),
                 "mrp": str(mrp),
+                "pack_size": str(pack_size),
+                "nishtha_points": str(nishtha_pts),
                 "oem": str(oem),
                 "image_link": str(image_link),
                 "row_index": int(idx)
@@ -143,7 +149,12 @@ def get_comprehensive_context(query: str) -> str:
     if not tokens:
         tokens = q_lower.split()
 
-    search_cols = [c for c in ['PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 'OEM', 'PUROLATOR', 'MAHLE', 'BOSCH'] if c in df_catalog.columns]
+    search_cols = [
+        c for c in [
+            'PART NO', 'MAKER', 'MODEL', 'APPLICATION', 'TYPE', 
+            'OEM', 'PUROLATOR', 'MAHLE', 'BOSCH', 'PACK SIZE', 'Nishtha Points'
+        ] if c in df_catalog.columns
+    ]
     combined_series = df_catalog[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
     
     mask = pd.Series(True, index=df_catalog.index)
@@ -157,6 +168,8 @@ def get_comprehensive_context(query: str) -> str:
             'APPLICATION': 'first',
             'TYPE': 'first',
             'MRP': 'first',
+            'PACK SIZE': 'first',
+            'Nishtha Points': 'first',
             'MODEL': lambda x: ', '.join(dict.fromkeys(str(v) for v in x if str(v) != 'N/A')),
             'OEM': 'first',
             'Image Link': 'first'
@@ -167,9 +180,13 @@ def get_comprehensive_context(query: str) -> str:
             img_val = str(row.get('Image Link', '')).strip()
             img_str = f" | Image: {img_val}" if img_val.startswith("http") else " | Image: N/A"
             models_display = row['MODEL'] if row['MODEL'] else 'Universal / Standard'
+            pack_sz = str(row.get('PACK SIZE', 'N/A')).replace('.0', '')
+            pts = str(row.get('Nishtha Points', 'N/A')).replace('.0', '')
+
             items.append(
                 f"- **Part No:** {row['PART NO']} | **OEM:** {row['OEM']} | **App:** {row['APPLICATION']} | "
-                f"**MRP:** ₹{row['MRP']} | **Models:** {models_display}{img_str}"
+                f"**MRP:** ₹{row['MRP']} | **Pack Size:** {pack_sz} | **Nishtha Points:** {pts} | "
+                f"**Models:** {models_display}{img_str}"
             )
         return f"Found {len(grouped)} distinct Part Numbers:\n" + "\n".join(items)
 
@@ -189,7 +206,7 @@ def stream_conversational_rag(user_query: str):
         "1. DO NOT truncate or omit any matching parts from the context.\n"
         "2. MANDATORY IMAGE RENDERING: For EVERY part that has an Image URL (starting with http), you MUST render it inline immediately below the part details using Markdown format: ![Part Preview](URL). Never output plain text URLs or skip the image.\n"
         "3. DO NOT use Markdown tables. Use bullet points with bold highlights.\n"
-        "4. For each part, include: Part Number, Applicable Models, Application, OEM, MRP in ₹, and the rendered image.\n"
+        "4. For each part, include: Part Number, Applicable Models, Application, OEM, MRP in ₹, Pack Size, Nishtha Points, and the rendered image.\n"
         "5. If a part has no valid image link (or is 'N/A'), omit the image markdown for that part.\n"
         "6. Be concise, friendly, and helpful."
     )
@@ -222,7 +239,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = [
         {
             "role": "assistant",
-            "content": "Hi there! I'm your Elofic Parts Advisor. We have filters for 2W, 3W, Cars, LCV-HCV, Tractors & Earthmovers. Ask me anything about our filters, prices, or compatibility."
+            "content": "Hi there! I'm your Elofic Parts Advisor. We have filters for 2W, 3W, Cars, LCV-HCV, Tractors & Earthmovers. Ask me anything about our filters, prices, pack sizes, loyalty points, or compatibility."
         }
     ]
 
