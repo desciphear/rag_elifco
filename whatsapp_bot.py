@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import traceback
 import requests
 import pandas as pd
@@ -11,8 +12,7 @@ app = FastAPI()
 # =========================================================
 # Configuration
 # =========================================================
-DEFAULT_FILES = ["Data for AI Agent  19-09-2026.xls"]
-EXCEL_FILE_PATH = next((f for f in DEFAULT_FILES if os.path.exists(f)), "Data for AI Agent  19-09-2026.xls")
+EXCEL_FILE_PATH = "Data for AI Agent  19-09-2026.xls"
 
 META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "1298145263384348")
@@ -28,7 +28,6 @@ client = OpenAI(
 # 1. Parsing & Cleaning Catalog Data
 # =========================================================
 def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
-    """Loads all sheets, normalizes column names, forward-fills merged values, and standardizes numbers."""
     if not os.path.exists(file_path):
         print(f"Catalog file '{file_path}' not found.")
         return pd.DataFrame()
@@ -40,7 +39,6 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
         df = df.dropna(how="all")
         df.columns = [str(col).strip() for col in df.columns]
 
-        # Standardize column variations across different Excel versions
         if 'OEM Number' in df.columns and 'OEM' not in df.columns:
             df['OEM'] = df['OEM Number']
         if 'IMAGE LINK' in df.columns and 'Image Link' not in df.columns:
@@ -66,10 +64,9 @@ def load_and_clean_dataframe(file_path: str) -> pd.DataFrame:
 df_catalog = load_and_clean_dataframe(EXCEL_FILE_PATH)
 
 # =========================================================
-# 2. Context Retrieval with Strict Numerical Logic
+# 2. Context Retrieval & Structured Item Extraction
 # =========================================================
 def extract_numeric_filters(query_lower: str):
-    """Detects equality and comparative filters for pack size and Nishtha points."""
     pack_op, pack_val = None, None
     m_gt = re.search(r'(?:pack\s*size|pack)\s*(?:is\s*)?(?:>|>=|greater than|more than|above|over)\s*(\d+)', query_lower)
     m_lt = re.search(r'(?:pack\s*size|pack)\s*(?:is\s*)?(?:<|<=|less than|under|below)\s*(\d+)', query_lower)
@@ -97,14 +94,14 @@ def extract_numeric_filters(query_lower: str):
     return (pack_op, pack_val), (pts_op, pts_val)
 
 
-def get_comprehensive_context(query: str):
+def get_matching_catalog_items(query: str):
+    """Returns structured list of matching parts with details and their individual images."""
     if df_catalog.empty:
-        return "Catalog data unavailable.", []
+        return []
 
     q_lower = query.lower()
     (pack_op, pack_val), (pts_op, pts_val) = extract_numeric_filters(q_lower)
 
-    # Filter by Pack Size
     df_filtered = df_catalog.copy()
     if pack_op and pack_val is not None:
         numeric_pack = pd.to_numeric(df_filtered['PACK SIZE'], errors='coerce').fillna(0)
@@ -115,7 +112,6 @@ def get_comprehensive_context(query: str):
         elif pack_op == '==':
             df_filtered = df_filtered[numeric_pack == pack_val]
 
-    # Filter by Nishtha Points
     if pts_op and pts_val is not None:
         numeric_pts = pd.to_numeric(df_filtered['Nishtha Points'], errors='coerce').fillna(0)
         if pts_op == '>':
@@ -125,7 +121,6 @@ def get_comprehensive_context(query: str):
         elif pts_op == '==':
             df_filtered = df_filtered[numeric_pts == pts_val]
 
-    # Keyword Search (for vehicle models, makers, parts, etc.)
     stop_words = {
         'get', 'all', 'where', 'for', 'the', 'in', 'of', 'and', 'filter', 'filters', 'parts', 
         'show', 'give', 'me', 'price', 'pack', 'size', 'points', 'nishtha',
@@ -143,9 +138,9 @@ def get_comprehensive_context(query: str):
         df_filtered = df_filtered[mask]
 
     if df_filtered.empty:
-        return "No matching parts found matching the specified criteria in the catalog.", []
+        return []
 
-    # Group by PART NO to prevent duplicates
+    # Group by PART NO
     grouped = df_filtered.groupby('PART NO').agg({
         'APPLICATION': 'first',
         'TYPE': 'first',
@@ -157,98 +152,112 @@ def get_comprehensive_context(query: str):
         'Image Link': 'first'
     }).reset_index()
 
-    items = []
-    unique_images = []
-    # Include up to 25 items so large lists aren't truncated
-    for _, row in grouped.head(25).iterrows():
+    matching_items = []
+    for _, row in grouped.iterrows():
         img_val = str(row.get('Image Link', '')).strip()
-        has_image = img_val.startswith("http")
-        if has_image and img_val not in unique_images:
-            unique_images.append(img_val)
-
-        img_str = f" | Image: {img_val}" if has_image else " | Image: N/A"
+        img_url = img_val if img_val.startswith("http") else None
+        
         models_display = row['MODEL'] if row['MODEL'] else 'Universal / Standard'
         pack_sz = str(row.get('PACK SIZE', 'N/A')).replace('.0', '')
         nishtha_pts = str(row.get('Nishtha Points', 'N/A')).replace('.0', '')
 
-        items.append(
-            f"- *Part No:* {row['PART NO']} | *Pack Size:* {pack_sz} | *MRP:* ₹{row['MRP']} | "
-            f"*Nishtha Points:* {nishtha_pts} | *App:* {row['APPLICATION']} | *Models:* {models_display}{img_str}"
+        caption = (
+            f"🔧 *Part No:* {row['PART NO']}\n"
+            f"📦 *Pack Size:* {pack_sz} | *MRP:* ₹{row['MRP']}\n"
+            f"⭐ *Nishtha Points:* {nishtha_pts}\n"
+            f"⚙️ *App:* {row['APPLICATION']}\n"
+            f"🚗 *Models:* {models_display}"
         )
 
-    context_str = f"Found {len(grouped)} matching Part Numbers:\n" + "\n".join(items)
-    return context_str, unique_images
+        matching_items.append({
+            "part_no": row['PART NO'],
+            "caption": caption,
+            "image_url": img_url
+        })
+
+    return matching_items
 
 # =========================================================
-# 3. Conversational Generator (WhatsApp-tailored)
+# 3. WhatsApp Cloud API Dispatcher
 # =========================================================
-def get_bot_reply(user_query: str):
-    context, image_urls = get_comprehensive_context(user_query)
-
-    if context.startswith("No matching parts found"):
-        return context, []
-
-    system_instruction = (
-        "You are an expert Elofic Auto Parts advisor on WhatsApp.\n\n"
-        "FORMATTING RULES:\n"
-        "1. Answer concisely using WhatsApp Markdown (*bold* with single asterisks, NEVER double asterisks **).\n"
-        "2. List ALL parts present in the Catalog Context that match the customer's request. Do not arbitrarily skip parts.\n"
-        "3. For each part, include: Part Number, Pack Size, MRP in ₹, Loyalty/Nishtha Points, Application, and Compatible Models.\n"
-        "4. DO NOT output markdown image tags like ![img](url).\n"
-        "5. Be direct, accurate, and professional."
-    )
-
-    res = client.chat.completions.create(
-        model="google/gemini-2.5-flash",
-        messages=[
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Catalog Context:\n{context}\n\nCustomer Inquiry: {user_query}"}
-        ],
-        temperature=0.1,
-        max_tokens=1500
-    )
-    
-    reply_text = res.choices[0].message.content
-    reply_text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', reply_text)
-    return reply_text, image_urls
-
-# =========================================================
-# 4. WhatsApp Cloud API Dispatcher
-# =========================================================
-def send_meta_whatsapp_message(to_number: str, text: str, image_urls: list):
+def send_whatsapp_text(to_number: str, text: str):
     url = f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {META_ACCESS_TOKEN}",
         "Content-Type": "application/json"
     }
-
-    # Step A: Send Text Response
-    text_payload = {
+    payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
         "to": to_number,
         "type": "text",
-        "text": {"preview_url": True, "body": text}
+        "text": {"preview_url": False, "body": text}
     }
-    r_text = requests.post(url, headers=headers, json=text_payload)
-    print(f"Text Response Status: {r_text.status_code}")
+    return requests.post(url, headers=headers, json=payload)
 
-    # Step B: Send at most one distinct preview image
-    if image_urls:
-        first_img = image_urls[0]
-        if str(first_img).startswith("http"):
-            img_payload = {
-                "messaging_product": "whatsapp",
-                "recipient_type": "individual",
-                "to": to_number,
-                "type": "image",
-                "image": {"link": first_img}
-            }
-            r_img = requests.post(url, headers=headers, json=img_payload)
-            print(f"Image Response Status: {r_img.status_code}")
+
+def send_whatsapp_image_with_details(to_number: str, image_url: str, caption: str):
+    url = f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {META_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to_number,
+        "type": "image",
+        "image": {
+            "link": image_url,
+            "caption": caption
+        }
+    }
+    return requests.post(url, headers=headers, json=payload)
+
+
+def dispatch_catalog_results(to_number: str, user_query: str):
+    items = get_matching_catalog_items(user_query)
+
+    if not items:
+        send_whatsapp_text(to_number, "❌ No matching parts found in the Elofic catalog for your inquiry.")
+        return
+
+    total_found = len(items)
+    display_limit = 5
+    items_to_send = items[:display_limit]
+
+    # Header / Intro notification
+    if total_found > display_limit:
+        intro_text = (
+            f"🔍 Found *{total_found}* matching parts in the catalog.\n"
+            f"Showing the top *{display_limit}* results below with images:"
+        )
+    else:
+        intro_text = f"🔍 Found *{total_found}* matching Elofic part(s):"
+
+    send_whatsapp_text(to_number, intro_text)
+
+    # Send each part attached to its image
+    for item in items_to_send:
+        time.sleep(0.3)
+        if item["image_url"]:
+            send_whatsapp_image_with_details(to_number, item["image_url"], item["caption"])
+        else:
+            send_whatsapp_text(to_number, item["caption"])
+
+    # Notify about remaining parts
+    if total_found > display_limit:
+        remaining_count = total_found - display_limit
+        time.sleep(0.3)
+        followup_text = (
+            f"📦 *+{remaining_count} more parts are available in our catalog!*\n\n"
+            f"💡 To see the remaining parts or narrow down your search, please specify a vehicle model "
+            f"(e.g., *'Swift'*, *'Alto'*), part application (e.g., *'Oil Filter'*, *'Air Filter'*), or pack size."
+        )
+        send_whatsapp_text(to_number, followup_text)
 
 # =========================================================
-# 5. Webhook Endpoints
+# 4. Webhook Endpoints
 # =========================================================
 @app.get("/")
 @app.get("/health")
@@ -284,8 +293,7 @@ async def handle_meta_message(request: Request):
                 user_text = msg.get("text", {}).get("body", "")
                 print(f"Received query from {from_number}: {user_text}")
 
-                bot_reply, images = get_bot_reply(user_text)
-                send_meta_whatsapp_message(from_number, bot_reply, images)
+                dispatch_catalog_results(from_number, user_text)
 
     except Exception as e:
         print(f"Error processing webhook: {e}")
