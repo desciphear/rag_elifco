@@ -14,7 +14,7 @@ from check import get_working_model
 EXCEL_FILE_PATH = "Data for AI Agent  19-09-2026.xls"
 COLLECTION_NAME = "elofic_catalog_v3"
 DB_PERSIST_PATH = "./elofic_vectordb"
-# OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 # =========================================================
 # 1. Parsing & Indexing Logic
@@ -252,24 +252,24 @@ def stream_conversational_rag(user_query: str):
     )
 
     prompt_content = f"Catalog Context:\n{context}\n\nCustomer Inquiry: {user_query}"
-    OPENROUTER_MODEL = get_working_model(api_key, 0)
-    if OPENROUTER_MODEL != "No working model found.":
-        stream = client.chat.completions.create(
-            model=OPENROUTER_MODEL,
-            messages=[
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": prompt_content},
-            ],
-            temperature=0.1,
-            max_tokens=2500,
-            stream=True,
-        )
+    # OPENROUTER_MODEL = get_working_model(api_key, 0)
+    # if OPENROUTER_MODEL != "No working model found.":
+    stream = client.chat.completions.create(
+        model=OPENROUTER_MODEL,
+        messages=[
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": prompt_content},
+        ],
+        temperature=0.1,
+        max_tokens=2500,
+        stream=True,
+    )
 
-        for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
-    else:
-        yield "Error: No working model found. Please check your API key or model availability."
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
+    # else:
+        # yield "Error: No working model found. Please check your API key or model availability."
 
 # =========================================================
 # 4. Streamlit Chat Interface
