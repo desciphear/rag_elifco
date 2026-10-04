@@ -4,7 +4,7 @@ import chromadb
 import pandas as pd
 import streamlit as st
 from chromadb.utils import embedding_functions
-from openai import OpenAI
+from google import genai
 from typing import Any, Dict, List
 from check import get_working_model
 
@@ -14,7 +14,7 @@ from check import get_working_model
 EXCEL_FILE_PATH = "Data for AI Agent  19-09-2026.xls"
 COLLECTION_NAME = "elofic_catalog_v3"
 DB_PERSIST_PATH = "./elofic_vectordb"
-OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+GOOGLE_MODEL = "gemini-3.8-flash"
 
 # =========================================================
 # 1. Parsing & Indexing Logic
@@ -121,10 +121,7 @@ if not api_key:
     st.error("Please configure your `OPENROUTER_API_KEY` in Streamlit Secrets or .env file.")
     st.stop()
 
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=api_key
-)
+client = genai.Client(api_key)
 
 # =========================================================
 # 2. Comprehensive Context Retriever
@@ -254,8 +251,8 @@ def stream_conversational_rag(user_query: str):
     prompt_content = f"Catalog Context:\n{context}\n\nCustomer Inquiry: {user_query}"
     # OPENROUTER_MODEL = get_working_model(api_key, 0)
     # if OPENROUTER_MODEL != "No working model found.":
-    stream = client.chat.completions.create(
-        model=OPENROUTER_MODEL,
+    stream = client.interactions.create(
+        model=GOOGLE_MODEL,
         messages=[
             {"role": "system", "content": system_instruction},
             {"role": "user", "content": prompt_content},
