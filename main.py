@@ -255,7 +255,7 @@ def stream_conversational_rag(user_query: str):
     prompt_content = f"Catalog Context:\n{context}\n\nCustomer Inquiry: {user_query}"
     # OPENROUTER_MODEL = get_working_model(api_key, 0)
     # if OPENROUTER_MODEL != "No working model found.":
-    stream = client.interactions.create(
+    stream = client.chat.completions.create(
         model=GOOGLE_MODEL,
         messages=[
             {"role": "system", "content": system_instruction},
