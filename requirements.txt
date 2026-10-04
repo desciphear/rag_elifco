@@ -8,7 +8,7 @@ google-genai
 python-dotenv
 tabulate
 torchvision
-openai
+google
 fastapi
 uvicorn
 twilio
