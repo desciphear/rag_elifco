@@ -264,7 +264,7 @@ def stream_conversational_rag(user_query: str):
         temperature =0.1,
         max_output_tokens = 2500,
         stream=True
-})
+)
 
     for chunk in stream:
         if chunk.choices and chunk.choices[0].delta.content:
