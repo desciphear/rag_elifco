@@ -4,7 +4,7 @@ import chromadb
 import pandas as pd
 import streamlit as st
 from chromadb.utils import embedding_functions
-from google import genai
+from openai import OpenAI
 from google.genai import types
 from typing import Any, Dict, List
 from check import get_working_model
@@ -122,7 +122,10 @@ if not api_key:
     st.error("Please configure your `API_KEY` in Streamlit Secrets or .env file.")
     st.stop()
 
-client = genai.Client()
+client = OpenAI(
+    api_key=api_key,
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+)
 
 # =========================================================
 # 2. Comprehensive Context Retriever
@@ -254,14 +257,13 @@ def stream_conversational_rag(user_query: str):
     # if OPENROUTER_MODEL != "No working model found.":
     stream = client.interactions.create(
         model=GOOGLE_MODEL,
-        contents=[
+        messages=[
             {"role": "system", "content": system_instruction},
             {"role": "user", "content": prompt_content},
         ],
-        config = {
-        "temperature" :0.1,
-        "max_output_tokens":2500,
-        "stream":True
+        temperature =0.1,
+        max_output_tokens = 2500,
+        stream=True
 })
 
     for chunk in stream:
