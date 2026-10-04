@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 from chromadb.utils import embedding_functions
 from google import genai
+from google.genai import types
 from typing import Any, Dict, List
 from check import get_working_model
 
@@ -253,14 +254,15 @@ def stream_conversational_rag(user_query: str):
     # if OPENROUTER_MODEL != "No working model found.":
     stream = client.interactions.create(
         model=GOOGLE_MODEL,
-        messages=[
+        contents=[
             {"role": "system", "content": system_instruction},
             {"role": "user", "content": prompt_content},
         ],
+        config = {
         temperature=0.1,
         max_tokens=2500,
         stream=True,
-    )
+})
 
     for chunk in stream:
         if chunk.choices and chunk.choices[0].delta.content:
