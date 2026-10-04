@@ -116,12 +116,12 @@ def initialize_database():
 df_catalog = load_and_clean_dataframe(EXCEL_FILE_PATH)
 collection = initialize_database()
 
-api_key = st.secrets.get("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
 if not api_key:
-    st.error("Please configure your `OPENROUTER_API_KEY` in Streamlit Secrets or .env file.")
+    st.error("Please configure your `API_KEY` in Streamlit Secrets or .env file.")
     st.stop()
 
-client = genai.Client(api_key)
+client = genai.Client()
 
 # =========================================================
 # 2. Comprehensive Context Retriever
