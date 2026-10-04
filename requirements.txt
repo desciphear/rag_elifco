@@ -1,7 +1,6 @@
 chromadb
 pandas
 streamlit
-torch
 openpyxl
 google-genai
 python-dotenv
